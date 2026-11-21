@@ -147,6 +147,23 @@
     const timer = setTimeout(() => reject(new Error('The endpoint did not answer in time.')), ms)
     promise.then((x) => { clearTimeout(timer); resolve(x) }, (e) => { clearTimeout(timer); reject(e) })
   })
+  // The wallet's provider checks for receipts only every 4 s. Asking our own endpoints
+  // every 0.5 s as well saves up to 4 s per step; on a fast chain that is most of the wait.
+  async function confirmFast(tx) {
+    const slow = tx.wait(); slow.catch(() => {})
+    let done = false
+    const fast = (async () => {
+      while (!done) {
+        await new Promise((r) => setTimeout(r, CFG.receiptMs || 500))
+        let rc = null
+        try { rc = await read((p) => p.getTransactionReceipt(tx.hash)) } catch (e) { rc = null }
+        if (rc) { if (rc.status === 0) throw new Error('The transaction was reverted on-chain.'); return rc }
+      }
+    })()
+    fast.catch(() => {})
+    try { return await Promise.race([slow, fast]) } finally { done = true }
+  }
+
   async function read(fn) {
     let lastErr
     for (let k = 0; k < CFG.rpcUrls.length; k++) {
@@ -1187,9 +1204,10 @@
         try { await fn.staticCall(...args) } catch (e) { throw new Error('Blocked by the contract: ' + reason(e)) }
         log((steps.length > 1 ? 'Step ' + (i + 1) + '/' + steps.length + ': ' : '') + label + ' – confirm in your wallet…')
         const tx = await fn(...args, feeOverrides())
+        const t0 = Date.now()
         log('  sent, waiting for confirmation…')
-        const rc = await tx.wait()
-        log('  confirmed in block ' + rc.blockNumber + '.')
+        const rc = await confirmFast(tx)
+        log('  confirmed in block ' + rc.blockNumber + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.')
       }
       row.querySelectorAll('input').forEach((inp) => { inp.value = inp.type === 'range' ? 0 : '' })
     } catch (e) {
