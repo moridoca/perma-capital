@@ -43,7 +43,7 @@ selector, five sections, and a tab bar on phones.
 
 | Section | What it shows |
 |---|---|
-| Trade | The trading terminal of the selected fund: price and NAV, candles from on-chain trades, the depth of the pool, the trade tape, order entry with a quote, balances, trade history, treasury. While a fund is still in its primary sale, the sale takes the terminal's place |
+| Trade | The trading terminal of the selected fund: price and NAV, candles from on-chain trades, the depth of the pool, the trade tape, order entry with a quote, balances, trade history, treasury. While a fund is still in its primary sale, the order column holds the sale and the chart shows its progress |
 | Funds | Every sub-fund under the umbrella. For the selected one: balance sheet, the rules the code enforces with their status right now, and what only the manager can do |
 | Reports | A fund report built from chain data: statement of net assets, capital account since launch, investments and valuations, manager fee, your position, event log, contract addresses |
 | Portfolio | The connected wallet: account value, holdings across all funds at market and at NAV, test mUSDC |

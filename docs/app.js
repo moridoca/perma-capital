@@ -462,7 +462,18 @@
     const d = state.detail
     PUT('trng').h = Object.keys(RANGES).map((r) => '<button aria-pressed="' + (state.range === r) + '" data-range="' + r + '">' + r + '</button>').join('')
     const cd = candleData = d.saleClosed ? candles() : null
-    if (!cd) { PUT('chartBox').h = '<p class="note">' + (d.saleClosed ? 'Loading price history…' : 'The chart starts when the sale closes and the market opens.') + '</p>'; PUT('tohlc').h = ''; return }
+    if (!cd && !d.saleClosed) {
+      const sp = Number((d.sold * 10000n) / SALE_CAP) / 100, pol = d.sold / 19n
+      PUT('tohlc').h = ''
+      PUT('chartBox').h = '<div class="salebox"><div class="salebig">' + amt(d.sold) + '<small> of 9,500,000 ' + esc(d.symbol) + ' sold · ' + sp.toFixed(1) + '%</small></div>' +
+        '<div class="meter"><i class="infoc" style="width:' + Math.min(100, sp) + '%"></i></div><ol class="salesteps">' +
+        '<li><b>Primary sale.</b> Investors buy new tokens from the fund at a fixed $1.00. The money goes into the vault.</li>' +
+        '<li><b>Close.</b> The GP closes the sale, or it sells out. For every 19 tokens sold, 1 token and $1 become fund-owned liquidity' +
+        (d.sold > 0n ? ': at today\'s level ' + amt(pol) + ' ' + esc(d.symbol) + ' + ' + amt(pol) + ' mUSDC.' : '.') + '</li>' +
+        '<li><b>Market.</b> Trading opens at $1.00 in the pool. Candles from on-chain trades and the NAV line appear here.</li></ol></div>'
+      return
+    }
+    if (!cd) { PUT('chartBox').h = '<p class="note">Loading price history…</p>'; return }
     const cs = cd.cs.filter((c) => !c.pre)
     const W = 860, H = 380, padR = 62, top = 14, ph = 280, vh = 56, gap = 12, N = cd.cs.length, iw = W - padR - 8, cw = iw / N
     let lo = Math.min(...cs.map((c) => Math.min(c.l, c.nav))), hi = Math.max(...cs.map((c) => Math.max(c.h, c.nav)))
@@ -510,8 +521,14 @@
   function renderHead() {
     const d = state.detail, f = cur(), s = marketStats()
     const cell = (k, v, cls) => '<div><span>' + k + '</span><b' + (cls ? ' class="' + cls + '"' : '') + '>' + v + '</b></div>'
-    PUT('thead').h = '<button class="tmkt" data-open-funds="1" aria-label="Choose a fund">' + badge(state.selected) + '<span><b>' + esc(d.symbol) + '</b><small>' + esc(f.name) +
-      '</small></span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></button><div class="tstats">' +
+    const mkt = '<button class="tmkt" data-open-funds="1" aria-label="Choose a fund">' + badge(state.selected) + '<span><b>' + esc(d.symbol) + '</b><small>' + esc(f.name) +
+      '</small></span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></button><div class="tstats">'
+    if (!d.saleClosed) {
+      PUT('thead').h = mkt + cell('Status', 'Primary sale') + cell('Issue price', '$1.0000') + cell('Sold', cmp(num(d.sold))) + cell('Sale cap', '9.50M') +
+        cell('NAV per token', px(s.nav)) + cell('Vault cash', '$' + cmp(num(d.vaultCash))) + cell('Market', 'opens when the sale closes') + '</div>'
+      return
+    }
+    PUT('thead').h = mkt +
       cell('Last', px(s.last), s.ch == null || s.ch >= 0 ? 'up' : 'dn') +
       cell('24h change', pcs(s.ch), s.ch == null || s.ch >= 0 ? 'up' : 'dn') +
       cell('NAV per token', px(s.nav)) +
@@ -595,11 +612,12 @@
   }
 
   function renderIpo() {
-    const d = state.detail, f = cur()
+    const d = state.detail, m = state.me
     const p = Number((d.sold * 10000n) / SALE_CAP) / 100
-    PUT('ipoStatus').h = '<div class="sechead"><h3>' + esc(f.name) + ': primary sale</h3><span class="pill ipo">Sale open</span></div>' +
-      '<p class="lead">New tokens from the fund at a fixed $1.00. This is the only issue: no capital calls later. When the sale closes, 5% of supply plus the same cash become fund-owned liquidity and the market opens at $1.00.</p>' +
-      '<dl class="kv"><dt>Price</dt><dd>$1.0000</dd><dt>Sold</dt><dd>' + amt(d.sold) + ' of 9,500,000 ' + esc(d.symbol) + ' (' + p.toFixed(1) + '%)</dd></dl><div class="meter"><i class="infoc" style="width:' + Math.min(100, p) + '%"></i></div>'
+    PUT('ipoStatus').h = '<p class="lead">New tokens from the fund at a fixed $1.00. This is the only issue: no capital calls later. When the sale closes, 5% of supply plus the same cash become fund-owned liquidity and the market opens at $1.00.</p>' +
+      '<div class="qrow"><span>Price</span><span>$1.0000</span></div><div class="qrow"><span>Sold</span><span>' + amt(d.sold) + ' of 9,500,000 (' + p.toFixed(1) + '%)</span></div><div class="meter"><i class="infoc" style="width:' + Math.min(100, p) + '%"></i></div>'
+    PUT('oacct2').h = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div>'
+      : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to buy' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
   }
 
   // ---------- Funds ----------
@@ -1052,10 +1070,11 @@
       '<div class="otype" role="group" aria-label="Order type"><button aria-pressed="true">Market</button></div>' +
       '<div class="oav"><span>Available</span><span id="oav">–</span></div>' + orderForm('swapbuy', 'Spend', 'mUSDC') + orderForm('sell', 'Size', '') +
       '<div class="oacct"><div class="oh">Account</div><div id="oacct"></div><div data-a="faucet"><button class="oclaim go">Get 100,000 test mUSDC</button><p class="qwarn why"></p></div></div>'
-    $('ipo').innerHTML = '<div class="card hi"><div id="ipoStatus"></div>' + '<div class="act" data-a="buy" style="display:flex;flex-direction:column;gap:12px">' + fieldsHtml(ACT.buy) +
-      '<div class="chips">' + ACT.buy.chips.map((c, i) => '<button type="button" class="chip" data-chip="' + i + '">' + c.l + '</button>').join('') + '</div><p class="note pre"></p><p class="note why"></p><button class="btn go">Buy at $1.00</button></div></div>' +
-      '<div class="btns">' + '<div data-a="faucet" style="flex:1 1 220px"><button class="btn ghost go">Get 100,000 test mUSDC</button><p class="note why"></p></div>' +
-      '<div data-a="close" style="flex:1 1 220px"><button class="btn ghost go">Close the sale, open the market</button><p class="note why"></p></div></div>'
+    $('ipo').innerHTML = '<div class="oh">Primary sale</div><div id="ipoStatus"></div>' +
+      '<div class="oform" data-a="buy">' + fieldsHtml(ACT.buy) + '<div class="chips">' + ACT.buy.chips.map((c, i) => '<button type="button" class="chip" data-chip="' + i + '">' + c.l + '</button>').join('') +
+      '</div><p class="note pre"></p><p class="qwarn why"></p><button class="ogo b go">Buy at $1.00</button></div>' +
+      '<div class="oacct"><div class="oh">Account</div><div id="oacct2"></div><div data-a="faucet"><button class="oclaim go">Get 100,000 test mUSDC</button><p class="qwarn why"></p></div>' +
+      '<div data-a="close"><button class="btn ghost sm go" style="width:100%">Close the sale, open the market</button><p class="qwarn why"></p></div></div>'
     for (const tab of ['gp', 'govern', 'pf']) $('act-' + tab).innerHTML = ACTIONS.filter((x) => x.tab === tab).map((a) => actHtml(a)).join('')
     $('rules').innerHTML = RULES.map((r) => '<div class="light" data-rule="' + r.k + '"><span class="lamp"></span><div class="grow"><div class="t">' + r.t + '</div><div class="d">' + r.p +
       '</div><div class="st"></div>' + (r.act ? actHtml(ACT[r.act], { inline: true }) : '') + '</div></div>').join('')
@@ -1099,7 +1118,7 @@
           : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to trade' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
         if (ac.__h !== html) { ac.innerHTML = html; ac.__h = html }
       }
-      $('term').hidden = !d.saleClosed
+      $('torder').hidden = !d.saleClosed
       $('ipo').hidden = d.saleClosed
     }
   }
@@ -1171,7 +1190,7 @@
 
   function render() {
     renderTop(); renderWallet(); buildActions(false)
-    renderHead(); renderChart(); renderBook(); renderBottom(); if (!state.detail.saleClosed) renderIpo()
+    renderHead(); renderChart(); renderBook(); renderBottom(); renderIpo()
     renderFunds(); renderKpis(); renderRules(); renderReports(); renderPortfolio(); renderGovern()
     updateActions()
   }
