@@ -24,6 +24,8 @@ window.PERMA_NETWORKS = {
     // Fees suggested to the wallet. Sepolia's base fee is close to zero, so the tip is the
     // whole price; MetaMask's default tip of 1.5 gwei is 30 times this.
     fees: { priorityGwei: '0.05', maxGwei: '0.1' },
+    // Gas sent from MetaMask to the trading key in one top-up (fast trading).
+    tkGas: '0.002',
     addChain: null
   },
   arbitrum: {
@@ -46,8 +48,9 @@ window.PERMA_NETWORKS = {
     pollMs: 2000,
     receiptMs: 250,
     // Arbitrum ignores the tip and charges only the base fee (0.02 gwei on 21 Nov 2026).
-    // The cap only has to stay above it.
-    fees: { priorityGwei: '0', maxGwei: '1' },
+    // The cap only has to stay above it; a lower cap means less gas has to sit in the trading key.
+    fees: { priorityGwei: '0', maxGwei: '0.2' },
+    tkGas: '0.002',
     // Lets MetaMask add the network if it does not know it yet.
     addChain: {
       chainName: 'Arbitrum Sepolia',

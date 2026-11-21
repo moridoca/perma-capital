@@ -49,6 +49,14 @@ selector, five sections, and a tab bar on phones.
 | Portfolio | The connected wallet: account value, holdings across all funds at market and at NAV, test mUSDC |
 | Govern | Votes to replace a manager, the valuations the GP has reported, the manager of each fund |
 
+**Fast trading.** Under Portfolio the page can create a trading key in the browser, like
+an agent key on Hyperliquid: top it up once with a little gas from MetaMask (one
+confirmation), mint test mUSDC to it, and from then on orders are signed by the key
+without a wallet pop-up. "Send everything back" returns mUSDC, fund tokens and the
+remaining gas to the MetaMask address. The key sits in the browser's storage, so this is
+for test networks only; GP actions still go through MetaMask. A production version would
+use a smart account with a session key limited to trading, an amount cap and an expiry.
+
 What the page does not pretend:
 
 - **A pool has no order book.** The depth panel shows how much the pool trades before its

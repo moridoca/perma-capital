@@ -94,7 +94,8 @@
       'function allowance(address owner, address spender) view returns (uint256)',
       'function approve(address spender, uint256 value) returns (bool)',
       'function mint(address to, uint256 amount)',
-      'function faucet()'
+      'function faucet()',
+      'function transfer(address to, uint256 value) returns (bool)'
     ]
   }
   const IFACE = { fund: new E.Interface(ABI.fund), pool: new E.Interface(ABI.pool), vesting: new E.Interface(ABI.vesting) }
@@ -634,8 +635,9 @@
     const p = Number((d.sold * 10000n) / SALE_CAP) / 100
     PUT('ipoStatus').h = '<p class="lead">New tokens from the fund at a fixed $1.00. This is the only issue: no capital calls later. When the sale closes, 5% of supply plus the same cash become fund-owned liquidity and the market opens at $1.00.</p>' +
       '<div class="qrow"><span>Price</span><span>$1.0000</span></div><div class="qrow"><span>Sold</span><span>' + amt(d.sold) + ' of 9,500,000 (' + p.toFixed(1) + '%)</span></div><div class="meter"><i class="infoc" style="width:' + Math.min(100, p) + '%"></i></div>'
-    PUT('oacct2').h = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div>'
+    const acct2 = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div>'
       : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to buy' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
+    PUT('oacct2').h = acct2 + signLine()
   }
 
   // ---------- Funds ----------
@@ -915,6 +917,8 @@
         }
       } catch (e) { /* stay read-only */ }
     }
+    state.mm = { account: state.account, signer: state.signer, chainOk: state.walletChainOk }
+    if (tkOn()) { state.account = state.tk.wallet.address; state.signer = keySigner(); state.walletChainOk = true }
     state.me = null
     renderWallet(); buildActions(true)
     refresh(true)
@@ -938,10 +942,136 @@
   function renderWallet() {
     const chip = $('walletChip'), m = state.me
     const set = (role, text, disabled) => { chip.dataset.role = role; chip.disabled = !!disabled; chip.querySelector('span').textContent = text }
-    if (!window.ethereum) set('none', 'Read-only', true)
+    if (tkOn()) set('key', '⚡ ' + short(state.tk.wallet.address))
+    else if (!window.ethereum) set('none', 'Read-only', true)
     else if (!state.account) set('connect', 'Connect wallet')
     else if (!state.walletChainOk) set('connect', 'Switch network')
     else set(m && m.isGP ? 'gp' : 'investor', short(state.account) + (m && m.isGP ? ' · GP' : ''))
+  }
+
+  // ---------- trading key: fast trading without a wallet pop-up per order ----------
+  // Like an agent key on Hyperliquid: a key created in this browser signs orders itself.
+  // It trades from its own balance: mint test mUSDC to it, top it up with a little gas from
+  // the wallet once, send everything back when done. Meant for test networks only: the key
+  // sits in this browser's storage.
+  const TK = 'perma.tk.' + CFG.chainId
+  const store = {
+    get: (k) => { try { return localStorage.getItem(k) } catch (e) { return null } },
+    set: (k, val) => { try { if (val === null) localStorage.removeItem(k); else localStorage.setItem(k, val) } catch (e) { /* memory only */ } }
+  }
+  state.tk = { wallet: null, on: false, eth: null, nonce: null, del: false }
+  try { const pk = store.get(TK); if (pk) { state.tk.wallet = new E.Wallet(pk); state.tk.on = store.get(TK + '.on') === '1' } } catch (e) { state.tk.wallet = null }
+  function tkOn() { return !!(state.tk.on && state.tk.wallet) }
+  function keySigner() { if (!state.provider) state.provider = makeProvider(state.rpcIndex); return state.tk.wallet.connect(state.provider) }
+  const TK_LOW = E.parseEther('0.0002')
+  // Nonce kept locally: public endpoints behind load balancers can lag one block behind.
+  async function tkNonce() {
+    const n = await read((p) => p.getTransactionCount(state.tk.wallet.address, 'pending'))
+    return state.tk.nonce == null ? n : Math.max(n, state.tk.nonce)
+  }
+  async function tkBalance() {
+    if (!state.tk.wallet) return
+    try { state.tk.eth = await read((p) => p.getBalance(state.tk.wallet.address)) } catch (e) { /* keep the last value */ }
+    renderTk()
+  }
+  function signLine() {
+    if (tkOn()) return '<div class="qrow"><span>Signing</span><span>⚡ trading key · <button class="tlink" data-tk="off">use MetaMask</button></span></div>'
+    return '<div class="qrow"><span>Signing</span><span>MetaMask · <button class="tlink" data-tk="' + (state.tk.wallet ? 'on">use trading key' : 'goto">set up fast trading') + '</button></span></div>'
+  }
+  function renderTk() {
+    const w = state.tk.wallet, mm = state.mm || {}
+    let h = '<div class="card tkcard"><h3>Fast trading</h3>'
+    if (!w) {
+      h += '<p class="lead">Trade without a wallet pop-up for every order, like an agent key on Hyperliquid. A trading key is created in this browser and signs orders itself. ' +
+        'It trades from its own balance: you top it up with a little gas once, mint test mUSDC to it and send everything back when you are done.</p>' +
+        '<button class="btn" data-tk="create">Create trading key</button>'
+    } else {
+      const eth = state.tk.eth
+      const low = eth !== null && eth < TK_LOW
+      h += '<dl class="kv"><dt>Trading key</dt><dd><a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/address/' + esc(w.address) + '">' + esc(short(w.address)) + '</a></dd>' +
+        '<dt>Gas</dt><dd' + (low ? ' class="dn"' : '') + '>' + (eth === null ? '–' : Number(E.formatEther(eth)).toFixed(5) + ' ETH') + '</dd>' +
+        '<dt>Signing now</dt><dd>' + (tkOn() ? '⚡ trading key' : 'MetaMask') + '</dd></dl>' +
+        '<div class="tkbtns"><button class="btn' + (tkOn() ? ' ghost' : '') + ' sm" data-tk="' + (tkOn() ? 'off">Use MetaMask' : 'on">Use trading key') + '</button>' +
+        '<button class="btn ghost sm" data-tk="fund"' + (mm.signer ? '' : ' disabled') + '>Top up gas: ' + esc(CFG.tkGas || '0.002') + ' ETH from MetaMask</button>' +
+        '<button class="btn ghost sm" data-tk="sweep"' + (mm.account ? '' : ' disabled') + '>Send everything back' + (mm.account ? ' to ' + esc(short(mm.account)) : '') + '</button>' +
+        '<button class="btn ghost sm" data-tk="del">' + (state.tk.del ? 'Click again: delete the key' : 'Delete key') + '</button></div>' +
+        (low ? '<p class="note dn">Almost no gas left: top it up before trading.</p>' : '') +
+        (mm.signer ? '' : '<p class="note">Topping up and sending back need MetaMask connected on ' + esc(CFG.network) + '.</p>')
+    }
+    h += '<p class="note">Test networks only. The key lives in this browser\'s storage: anyone using this browser can trade with it, and clearing site data deletes it. Send everything back first. GP actions still go through MetaMask.</p></div>'
+    PUT('tk').h = h
+  }
+  async function tkSend(label, make) {
+    const s = keySigner(), k = await tkNonce()
+    log(label + ' – signed by the trading key…')
+    const tx = await make(s, k)
+    state.tk.nonce = k + 1
+    const t0 = Date.now(), rc = await confirmFast(tx)
+    log('  confirmed in block ' + rc.blockNumber + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.')
+  }
+  async function tkClick(what) {
+    if (state.busy) return
+    if (what === 'goto') { setTab('portfolio'); return }
+    if (what === 'create') {
+      const w = E.Wallet.createRandom()
+      state.tk.wallet = new E.Wallet(w.privateKey); state.tk.on = true; state.tk.nonce = null
+      store.set(TK, w.privateKey); store.set(TK + '.on', '1')
+      log('Trading key created: ' + w.address + '. Top it up with gas, then mint test mUSDC to it.')
+      await syncWallet(); tkBalance(); return
+    }
+    if (what === 'on' || what === 'off') {
+      state.tk.on = what === 'on'; state.tk.nonce = null; store.set(TK + '.on', state.tk.on ? '1' : '0')
+      await syncWallet(); renderTk(); return
+    }
+    if (what === 'del') {
+      if (!state.tk.del) { state.tk.del = true; renderTk(); setTimeout(() => { state.tk.del = false; renderTk() }, 4000); return }
+      store.set(TK, null); store.set(TK + '.on', null)
+      state.tk = { wallet: null, on: false, eth: null, nonce: null, del: false }
+      log('Trading key deleted from this browser.')
+      await syncWallet(); renderTk(); return
+    }
+    const mm = state.mm || {}, addr = state.tk.wallet && state.tk.wallet.address
+    if (!addr) return
+    state.busy = true; updateActions()
+    try {
+      if (what === 'fund') {
+        if (!mm.signer) throw new Error('Connect MetaMask on ' + CFG.network + ' first.')
+        const value = E.parseEther(CFG.tkGas || '0.002')
+        log('Topping up the trading key with ' + (CFG.tkGas || '0.002') + ' ETH – confirm in your wallet…')
+        const tx = await mm.signer.sendTransaction(Object.assign({ to: addr, value }, feeOverrides()))
+        const t0 = Date.now(), rc = await confirmFast(tx)
+        log('  confirmed in block ' + rc.blockNumber + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.')
+      } else if (what === 'sweep') {
+        if (!mm.account) throw new Error('Connect MetaMask first: everything goes back to that address.')
+        const to = mm.account
+        const assets = [[CFG.usdc, 'mUSDC'], ...state.funds.map((f) => [f.token, f.symbol || 'tokens'])]
+        let moved = 0
+        for (const [t, sym] of assets) {
+          const bal = await read((p) => new E.Contract(t, ABI.erc20, p).balanceOf(addr))
+          if (bal === 0n) continue
+          await tkSend('Returning ' + amt(bal) + ' ' + sym, (s, nonce) => new E.Contract(t, ABI.erc20, s).transfer(to, bal, Object.assign(feeOverrides(), { nonce })))
+          moved++
+        }
+        // Gas last: whatever is left after the fee of this transfer.
+        const bal = await read((p) => p.getBalance(addr))
+        const blk = await read((p) => p.getBlock('latest'))
+        const tip = CFG.fees ? E.parseUnits(CFG.fees.priorityGwei, 'gwei') : 0n
+        const maxFee = (blk && blk.baseFeePerGas ? blk.baseFeePerGas * 2n : E.parseUnits('1', 'gwei')) + tip
+        const gas = await read((p) => p.estimateGas({ from: addr, to, value: 1n }))
+        const value = bal - gas * maxFee
+        if (value > 0n) {
+          await tkSend('Returning ' + Number(E.formatEther(value)).toFixed(5) + ' ETH', (s, nonce) => s.sendTransaction({ to, value, gasLimit: gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: tip, nonce }))
+          moved++
+        }
+        if (!moved) log('Nothing to send back: the trading key is empty.')
+        else log('Sent back to ' + short(to) + '. A tiny amount of ETH stays behind to cover the last fee.')
+      }
+    } catch (e) {
+      log('Fast trading: ' + reason(e), true)
+    } finally {
+      state.busy = false
+      await refresh(true); tkBalance(); updateActions()
+    }
   }
 
   // ---------- actions ----------
@@ -1153,7 +1283,8 @@
         const html = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div><div class="qrow"><span>Value at pool price</span><span>$' +
           cmp(num(m.token) * num(d.marketPrice)) + '</span></div><div class="qrow"><span>Value at NAV</span><span>$' + cmp(num(m.token) * num(d.navPerToken)) + '</span></div>'
           : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to trade' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
-        if (ac.__h !== html) { ac.innerHTML = html; ac.__h = html }
+        const full = html + signLine()
+        if (ac.__h !== full) { ac.innerHTML = full; ac.__h = full }
       }
       $('torder').hidden = !d.saleClosed
       $('ipo').hidden = d.saleClosed
@@ -1196,7 +1327,8 @@
     let v
     try { v = readFields(a, row) } catch (e) { log(a.title + ': ' + e.message, true); return }
     state.busy = true; updateActions()
-    const f = cur(), s = state.signer
+    if (tkOn() && state.tk.eth !== null && state.tk.eth < TK_LOW) { log('The trading key has almost no gas left: top it up under Portfolio › Fast trading.', true); return }
+    const f = cur(), s = tkOn() ? keySigner() : state.signer
     const c = {
       account: state.account, f, d: state.detail,
       fund: new E.Contract(f.fund, ABI.fund, s), token: new E.Contract(f.token, ABI.erc20, s),
@@ -1209,8 +1341,11 @@
         const [label, contract, method, args] = steps[i]
         const fn = contract.getFunction(method)
         try { await fn.staticCall(...args) } catch (e) { throw new Error('Blocked by the contract: ' + reason(e)) }
-        log((steps.length > 1 ? 'Step ' + (i + 1) + '/' + steps.length + ': ' : '') + label + ' – confirm in your wallet…')
-        const tx = await fn(...args, feeOverrides())
+        log((steps.length > 1 ? 'Step ' + (i + 1) + '/' + steps.length + ': ' : '') + label + (tkOn() ? ' – signed by the trading key…' : ' – confirm in your wallet…'))
+        const opts = feeOverrides(), k = tkOn() ? await tkNonce() : null
+        if (k !== null) opts.nonce = k
+        const tx = await fn(...args, opts)
+        if (k !== null) state.tk.nonce = k + 1
         const t0 = Date.now()
         log('  sent, waiting for confirmation…')
         const rc = await confirmFast(tx)
@@ -1222,12 +1357,12 @@
     } finally {
       state.busy = false
       await refresh(true)
-      updateActions()
+      updateActions(); tkBalance()
     }
   }
 
   function render() {
-    renderTop(); renderWallet(); buildActions(false)
+    renderTop(); renderWallet(); renderTk(); buildActions(false)
     renderHead(); renderChart(); renderBook(); renderBottom(); renderIpo()
     renderFunds(); renderKpis(); renderRules(); renderReports(); renderPortfolio(); renderGovern()
     updateActions()
@@ -1244,6 +1379,7 @@
   function setTab(t) { state.tab = t; state.fsel = false; renderTop(); window.scrollTo(0, 0) }
   document.addEventListener('click', (e) => {
     const t = e.target
+    const tkB = t.closest('[data-tk]'); if (tkB) { if (!tkB.disabled) tkClick(tkB.dataset.tk); return }
     const tabB = t.closest('[data-tab]'); if (tabB) { setTab(tabB.dataset.tab); return }
     if (t.closest('#fbtn') || t.closest('[data-open-funds]')) { state.fsel = !state.fsel; renderTop(); if (state.fsel) { const q = $('f-q'); if (q && window.innerWidth >= 700) q.focus() } return }
     const ff = t.closest('[data-ff]'); if (ff) { state.ff = ff.dataset.ff; $('fpanel').innerHTML = ''; renderTop(); return }
@@ -1307,5 +1443,6 @@
   }
   setInterval(() => { if (state.detail) { renderRules(); renderGovern(); updateActions(); setNet(state.netOk) } }, 1000)
   setInterval(() => refresh(false), CFG.pollMs)
-  syncWallet()
+  setInterval(() => tkBalance(), Math.max(CFG.pollMs, 4000))
+  syncWallet(); tkBalance()
 })()
