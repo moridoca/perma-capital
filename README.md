@@ -38,29 +38,38 @@ without a wallet. With MetaMask on Sepolia it can also send every transaction th
 offer; each one is checked against the contract first, and a refusal is shown with the
 contract's own reason (for example "Fund: discount below trigger").
 
-- **Umbrella**: every sub-fund with NAV per token, market price and premium or discount.
-- **Chart**: NAV per token against the pool price, from on-chain events plus live values.
-- **What the code enforces, right now**: sale cap, fund-owned liquidity, buyback trigger,
-  follow-on price, fee schedule and vesting, GP-removal vote, each with its current status.
-- **Invested value** is flagged as GP-reported: it is the one number not verified on-chain.
+| Tab | What it shows |
+|---|---|
+| Home | The umbrella with every sub-fund, and the balance sheet of the selected one |
+| Trade | Wallet balances, test mUSDC, the primary sale, buying and selling in the pool, the follow-on. Each trade shows the price it will leave behind before you send it |
+| Rules | What the code enforces, each rule with its status right now: sale cap, fund-owned liquidity, buyback trigger, follow-on price, fee schedule, GP removal, and the one trust assumption |
+| Manager | What only the GP can do: deploy capital, revalue the portfolio, open a follow-on, return proceeds |
+| Govern | The vote to replace the GP |
+| Activity | On-chain events, what this browser sent, and all contract addresses |
+
+NAV per token, market price and the chart of both stay in view on a wide screen; on a phone
+they are the top of the Home tab and a one-line strip elsewhere. Invested value is flagged
+as GP-reported wherever it appears: it is the one number not verified on-chain.
 
 The page suggests a tip of 0.05 gwei to the wallet. Sepolia's base fee is close to zero, so
 the tip is the whole price, and MetaMask's default of 1.5 gwei costs 30 times as much.
+Fonts are served from this repository (SIL Open Font License, see `docs/vendor/fonts`), so
+the page makes no third-party request except to the Sepolia endpoints.
 
 ## A live walkthrough with one wallet
 
 The numbers are from a run of exactly these steps on a local chain.
 
-| Step | Action in the dashboard | Result |
+| Step | Tab and action | Result |
 |---|---|---|
-| 1 | Get test mUSDC: 2,000,000 | Wallet funded |
-| 2 | Buy in the primary sale: 1,000,000 | 1,000,000 pBUY at $1.00 |
-| 3 | Close the sale (GP) | Market opens at $1.00; 52,632 pBUY + 52,632 mUSDC become fund-owned liquidity |
-| 4 | Deploy capital (GP): 600,000 | NAV stays $1.00; vault cash 347,368 |
-| 5 | Sell tokens in the pool: 5,000 | Market $0.8342, discount 16.6%; buyback shows "triggered" |
-| 6 | Trigger the buyback (empty = maximum) | 3,474 mUSDC spent; market $0.9589, discount 4.1% |
-| 7 | Revalue the portfolio (GP): 750,000 | NAV $1.1512; the discount widens to 16.7% and the buyback is triggered again |
-| 8 | After one demo year: mint the management fee | 2% of supply in new tokens, locked in vesting |
+| 1 | Trade: get test mUSDC, 2,000,000 | Wallet funded |
+| 2 | Trade: primary sale, 1,000,000 | 1,000,000 pBUY at $1.00 |
+| 3 | Rules: close the sale (GP) | Market opens at $1.00; 52,632 pBUY + 52,632 mUSDC become fund-owned liquidity |
+| 4 | Manager: deploy capital, 600,000 | NAV stays $1.00; vault cash 347,368 |
+| 5 | Trade: sell in the pool, 5,000 | Market $0.8342, discount 16.6%; the buyback rule shows "triggered" |
+| 6 | Rules: trigger the buyback (empty = maximum) | 3,474 mUSDC spent; market $0.9589, discount 4.1% |
+| 7 | Manager: revalue the portfolio, 750,000 | NAV $1.1512; the discount widens to 16.7% and the buyback is triggered again |
+| 8 | Rules, after one demo year: mint the fee tranche | 2% of supply in new tokens, locked in vesting |
 
 The wallet that deployed the contracts is the GP of all three sub-funds. The GP cannot vote
 on his own removal, so the governance steps need a second wallet that holds tokens.

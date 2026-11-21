@@ -1,6 +1,7 @@
 // Live deployment the dashboard reads from. See scripts/perma/sepolia-deployment.json.
 window.PERMA_CONFIG = {
   network: 'Sepolia testnet',
+  short: 'Sepolia',
   chainId: 11155111,
   // Public read-only endpoints, tried in this order. No API key, no wallet needed for reading.
   rpcUrls: [
