@@ -289,6 +289,7 @@
   }
 
   async function refresh(force) {
+    if (!CFG.umbrella) return
     if (state.refreshing && Date.now() - state.startedAt < 45000) { state.pending = state.pending || force; return }
     state.refreshing = true; state.startedAt = Date.now()
     const gen = ++state.gen
@@ -925,7 +926,13 @@
   async function switchChain() {
     try {
       await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x' + CFG.chainId.toString(16) }] })
-    } catch (e) { log('Wallet: ' + reason(e), true) }
+    } catch (e) {
+      // 4902: the wallet does not know this network yet, so offer to add it.
+      const unknown = e && (e.code === 4902 || (e.data && e.data.originalError && e.data.originalError.code === 4902))
+      if (unknown && CFG.addChain) {
+        try { await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [Object.assign({ chainId: '0x' + CFG.chainId.toString(16) }, CFG.addChain)] }) } catch (e2) { log('Wallet: ' + reason(e2), true) }
+      } else log('Wallet: ' + reason(e), true)
+    }
     syncWallet()
   }
   function renderWallet() {
@@ -1286,7 +1293,18 @@
     window.ethereum.on('chainChanged', syncWallet)
   }
   $('netChip').textContent = CFG.short || CFG.network
+  const NETS = window.PERMA_NETWORKS || {}
+  const others = Object.keys(NETS).filter((k) => k !== CFG.key)
+  if (others.length) $('netChip').insertAdjacentHTML('afterend', others.map((k) => '<a class="net alt" href="?net=' + esc(k) + '" title="Open the ' + esc(NETS[k].network) + ' deployment">' + esc(NETS[k].short) + '</a>').join(''))
   renderTop()
+  if (!CFG.umbrella) {
+    // Network configured but nothing deployed there yet: say so instead of failing to read.
+    $('fatal').hidden = false
+    $('fatal').textContent = 'PERMA is not deployed on ' + CFG.network + ' yet. Run scripts/perma/deploy_arbitrum_sepolia.ts in Remix, then enter the addresses in docs/config.js.'
+    $('netText').textContent = CFG.network
+    syncWallet()
+    return
+  }
   setInterval(() => { if (state.detail) { renderRules(); renderGovern(); updateActions(); setNet(state.netOk) } }, 1000)
   setInterval(() => refresh(false), CFG.pollMs)
   syncWallet()

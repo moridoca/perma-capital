@@ -104,6 +104,24 @@ sold. Enforcing it would mean changing `closeSale` and deploying again.
 The wallet that deployed the contracts is the GP of all three sub-funds. The GP cannot vote
 on his own removal, so the governance steps need a second wallet that holds tokens.
 
+## Second network: Arbitrum Sepolia
+
+Same contracts on Arbitrum's testnet, where a block comes every ~0.3 s instead of every
+12 s on Sepolia. The chip next to the logo switches between the two deployments
+(`?net=sepolia`, `?net=arbitrum`), so both can be compared side by side; the log shows
+how long each transaction took.
+
+1. MetaMask: the dashboard offers to add Arbitrum Sepolia (chain id 421614) when you press
+   "Switch network" on `?net=arbitrum`.
+2. Get ETH on Arbitrum Sepolia from a faucet, or bridge SepoliaETH at
+   [bridge.arbitrum.io](https://bridge.arbitrum.io).
+3. Remix: compile as before, MetaMask on Arbitrum Sepolia, run
+   `scripts/perma/deploy_arbitrum_sepolia.ts` (7 confirmations). The script stops on any
+   other chain.
+4. Enter the printed umbrella, mUSDC and deploy block under `arbitrum` in `docs/config.js`.
+
+Until step 4 the Arbitrum page says that nothing is deployed there yet.
+
 ## Running it yourself
 
 - **Remix VM**: follow `contracts/perma/README.md`, then run `scripts/perma/demo.ts`.
