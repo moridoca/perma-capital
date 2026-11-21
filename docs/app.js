@@ -105,7 +105,7 @@
     block: 0, chainTime: 0, fetchedAt: 0,
     scan: {}, live: {},
     account: null, signer: null, walletChainOk: false,
-    busy: false, refreshing: false, pending: false, actionsKey: '', autoOpened: false
+    busy: false, refreshing: false, pending: false, netOk: false, startedAt: 0, gen: 0, shown: -1, actionsKey: '', autoOpened: false
   }
 
   // ---------- formatting ----------
@@ -132,13 +132,25 @@
   const now = () => (state.chainTime ? state.chainTime + (Date.now() - state.fetchedAt) / 1000 : Date.now() / 1000)
 
   // ---------- read provider with failover ----------
-  const makeProvider = (i) => new E.JsonRpcProvider(CFG.rpcUrls[i], CFG.chainId, { staticNetwork: true, batchMaxCount: CFG.batch || 10 })
+  // Public endpoints can stall or rate-limit. Each request gets a hard timeout and few
+  // retries, and a whole read that takes too long moves on to the next endpoint.
+  const READ_TIMEOUT_MS = 12000
+  const makeProvider = (i) => {
+    const req = new E.FetchRequest(CFG.rpcUrls[i])
+    req.timeout = 9000
+    req.setThrottleParams({ maxAttempts: 2, slotInterval: 400 })
+    return new E.JsonRpcProvider(req, CFG.chainId, { staticNetwork: true, batchMaxCount: CFG.batch || 10 })
+  }
+  const withTimeout = (promise, ms) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('The endpoint did not answer in time.')), ms)
+    promise.then((x) => { clearTimeout(timer); resolve(x) }, (e) => { clearTimeout(timer); reject(e) })
+  })
   async function read(fn) {
     let lastErr
     for (let k = 0; k < CFG.rpcUrls.length; k++) {
       try {
         if (!state.provider) state.provider = makeProvider(state.rpcIndex)
-        return await fn(state.provider)
+        return await withTimeout(fn(state.provider), READ_TIMEOUT_MS)
       } catch (e) {
         lastErr = e
         state.rpcIndex = (state.rpcIndex + 1) % CFG.rpcUrls.length
@@ -248,8 +260,9 @@
   }
 
   async function refresh(force) {
-    if (state.refreshing) { state.pending = state.pending || force; return }
-    state.refreshing = true
+    if (state.refreshing && Date.now() - state.startedAt < 45000) { state.pending = state.pending || force; return }
+    state.refreshing = true; state.startedAt = Date.now()
+    const gen = ++state.gen
     try {
       const bn = await read((p) => p.getBlockNumber())
       if (!force && bn === state.block && state.detail) return
@@ -263,8 +276,8 @@
       try { await read((p) => scanLogs(p, idx, f, bn)); state.scan[idx].failed = false } catch (e) {
         if (state.scan[idx]) state.scan[idx].failed = true
       }
-      if (idx !== state.selected) return // selection changed while loading
-      state.funds = funds; state.detail = d; state.me = me
+      if (idx !== state.selected || gen !== state.gen) return // selection changed or a newer refresh took over
+      state.funds = funds; state.detail = d; state.me = me; state.shown = idx
       state.block = bn; state.chainTime = Number(blk.timestamp); state.fetchedAt = Date.now()
       if (d.saleClosed) {
         const live = state.live[idx] || (state.live[idx] = [])
@@ -277,20 +290,27 @@
       $('fatal').hidden = true
       render()
     } catch (e) {
+      if (gen !== state.gen) return
       setNet(false)
       if (!state.detail) {
         $('fatal').hidden = false
         $('fatal').textContent = 'Could not read from ' + CFG.network + ': ' + reason(e) + ' Retrying…'
       }
     } finally {
-      state.refreshing = false
-      if (state.pending) { state.pending = false; setTimeout(() => refresh(true), 0) }
+      if (gen === state.gen) {
+        state.refreshing = false
+        if (state.pending || (state.netOk && state.shown !== state.selected)) { state.pending = false; setTimeout(() => refresh(true), 0) }
+      }
     }
   }
 
   function setNet(ok) {
-    $('netDot').className = 'dot ' + (ok ? 'ok' : 'bad')
-    $('netText').textContent = ok ? CFG.network + ' · block ' + state.block.toLocaleString('en-US') : CFG.network + ' · connection problem, retrying'
+    state.netOk = ok
+    const age = state.fetchedAt ? Math.round((Date.now() - state.fetchedAt) / 1000) : 0
+    const stale = age > 30
+    $('netDot').className = 'dot ' + (ok && !stale ? 'ok' : 'bad')
+    $('netText').textContent = CFG.network + (state.block ? ' · block ' + state.block.toLocaleString('en-US') : '') +
+      (!ok ? ' · connection problem, retrying' : stale ? ' · last update ' + dur(age) + ' ago' : '')
   }
 
   // ---------- rendering ----------
@@ -750,7 +770,7 @@
     window.ethereum.on('accountsChanged', syncWallet)
     window.ethereum.on('chainChanged', syncWallet)
   }
-  setInterval(() => { if (state.detail) { renderRules(); updateActions() } }, 1000)
+  setInterval(() => { if (state.detail) { renderRules(); updateActions(); setNet(state.netOk) } }, 1000)
   setInterval(() => refresh(false), CFG.pollMs)
   syncWallet()
 })()
