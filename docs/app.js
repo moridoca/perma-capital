@@ -93,14 +93,16 @@
       'function balanceOf(address) view returns (uint256)',
       'function allowance(address owner, address spender) view returns (uint256)',
       'function approve(address spender, uint256 value) returns (bool)',
-      'function mint(address to, uint256 amount)'
+      'function mint(address to, uint256 amount)',
+      'function faucet()'
     ]
   }
   const IFACE = { fund: new E.Interface(ABI.fund), pool: new E.Interface(ABI.pool), vesting: new E.Interface(ABI.vesting) }
 
   const state = {
     rpcIndex: 0, provider: null,
-    funds: [], selected: 0, detail: null, me: null, tab: 'home', side: 'buy',
+    funds: [], selected: 0, detail: null, me: null, sym: {},
+    tab: 'trade', sub: 'overview', range: 'All', pane: 'book', ttab: 'balances', side: 'buy', fsel: false, ff: 'all', fq: '',
     year: 0, voting: 0,
     block: 0, chainTime: 0, fetchedAt: 0,
     scan: {}, live: {},
@@ -169,10 +171,22 @@
     }
     const count = Number(await u.subFundCount())
     const rows = await Promise.all(Array.from({ length: count }, (_, i) => u.overview(i)))
-    return rows.map((o) => ({
+    const funds = rows.map((o) => ({
       name: o[0], fund: o[1], token: o[2], pool: o[3], vesting: o[4],
       nav: o[5], price: o[6], premiumBps: o[7], netAssets: o[8]
     }))
+    // Per fund: who manages it, whether it trades, and the state of its vote. Token symbols never change.
+    const LITE = ['gp', 'saleClosed', 'voteActive', 'proposalId', 'proposedGP', 'voteDeadline', 'yesVotes', 'eligibleSupply']
+    const lite = await Promise.all(funds.flatMap((f) => {
+      const c = new E.Contract(f.fund, ABI.fund, p)
+      return [...LITE.map((k) => c[k]()), state.sym[f.token] ? Promise.resolve(state.sym[f.token]) : new E.Contract(f.token, ABI.erc20, p).symbol()]
+    }))
+    funds.forEach((f, i) => {
+      const o = i * (LITE.length + 1)
+      LITE.forEach((k, j) => { f[k] = lite[o + j] })
+      f.symbol = state.sym[f.token] = lite[o + LITE.length]
+    })
+    return funds
   }
 
   const FUND_KEYS = ['gp', 'saleClosed', 'sold', 'initialSupply', 'investedValue', 'feeTranchesMinted', 'lastFeeMint',
@@ -200,15 +214,13 @@
     return d
   }
 
-  async function loadMe(p, f, d) {
+  async function loadMe(p, funds, d, idx) {
     if (!state.account) return null
-    const usdc = new E.Contract(CFG.usdc, ABI.erc20, p)
-    const token = new E.Contract(f.token, ABI.erc20, p)
-    const fund = new E.Contract(f.fund, ABI.fund, p)
-    const [u, t, esc0] = await Promise.all([
-      usdc.balanceOf(state.account), token.balanceOf(state.account), fund.escrowed(d.proposalId, state.account)
-    ])
-    return { usdc: u, token: t, escrowed: esc0, isGP: d.gp.toLowerCase() === state.account.toLowerCase() }
+    const me = state.account
+    const res = await Promise.all([new E.Contract(CFG.usdc, ABI.erc20, p).balanceOf(me),
+      ...funds.flatMap((f) => [new E.Contract(f.token, ABI.erc20, p).balanceOf(me), new E.Contract(f.fund, ABI.fund, p).escrowed(f.proposalId, me)])])
+    const by = funds.map((f, i) => ({ token: res[1 + i * 2], escrowed: res[2 + i * 2], isGP: f.gp.toLowerCase() === me.toLowerCase() }))
+    return { usdc: res[0], token: by[idx].token, escrowed: by[idx].escrowed, isGP: d.gp.toLowerCase() === me.toLowerCase(), by }
   }
 
   // Event history of one sub-fund, read in block chunks and kept in memory.
@@ -272,7 +284,7 @@
       const idx = state.selected
       const f = funds[idx]
       const [d, blk] = await Promise.all([read((p) => loadDetail(p, f)), read((p) => p.getBlock('latest'))])
-      const me = await read((p) => loadMe(p, f, d))
+      const me = await read((p) => loadMe(p, funds, d, idx))
       try { await read((p) => scanLogs(p, idx, f, bn)); state.scan[idx].failed = false } catch (e) {
         if (state.scan[idx]) state.scan[idx].failed = true
       }
@@ -291,6 +303,7 @@
       render()
     } catch (e) {
       if (gen !== state.gen) return
+      console.warn('PERMA: refresh failed:', e)
       setNet(false)
       if (!state.detail) {
         $('fatal').hidden = false
@@ -314,60 +327,309 @@
   }
 
 
-  // ---------- rendering ----------
-  const TABS = [['home', 'Home'], ['trade', 'Trade'], ['rules', 'Rules'], ['gp', 'Manager'], ['govern', 'Govern'], ['activity', 'Activity']]
-  const ICON = {
-    home: '<path d="M4 11l8-7 8 7v9h-5v-6H9v6H4z"/>',
-    trade: '<path d="M7 20V4M7 4L4 7M7 4l3 3M17 4v16M17 20l-3-3M17 20l3-3"/>',
-    rules: '<path d="M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-4.5"/>',
-    gp: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2M3 13h18"/>',
-    govern: '<path d="M4 20h16M6 20V10M10 20V10M14 20V10M18 20V10M3 10l9-6 9 6z"/>',
-    activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>'
+  // ---------- derived data ----------
+  const cmp = (n) => {
+    const a = Math.abs(n)
+    return a >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : a >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : n.toLocaleString('en-US', { maximumFractionDigits: a >= 100 ? 0 : 2 })
   }
-  const gapText = (bps) => (bps < 0 ? 'discount ' : 'premium ') + pct(Math.abs(bps))
-  const gapPill = (price, bps) => price === 0n ? '<span class="pill">market not open</span>'
-    : '<span class="pill ' + (Number(bps) < 0 ? 'warn' : 'okp') + '">' + gapText(Number(bps)) + '</span>'
+  const px = (n) => (n == null || !isFinite(n) ? '–' : '$' + n.toFixed(4))
+  const pcs = (frac, dp) => (frac == null || !isFinite(frac) ? '–' : (frac < 0 ? '−' : '+') + Math.abs(frac * 100).toFixed(dp == null ? 2 : dp) + '%')
+  const gapOf = (price, nav) => Math.trunc((price / nav - 1) * 10000) / 10000 // truncated like premiumBps() in the contract
   const letter = (name) => { const w = String(name).trim().split(/\s+/); return (w[1] || w[0] || '?').charAt(0).toUpperCase() }
+  const badge = (i, sm) => '<span class="badge' + (sm ? ' sm' : '') + ' r' + ((i % 3) + 1) + '">' + esc(letter(state.funds[i].name)) + '</span>'
+  const cur = () => state.funds[state.selected]
 
-  function renderTabs() {
-    $('tabs').innerHTML = TABS.map((t) => '<button data-tab="' + t[0] + '"' + (state.tab === t[0] ? ' aria-current="page"' : '') +
-      '><svg viewBox="0 0 24 24" aria-hidden="true">' + ICON[t[0]] + '</svg>' + t[1] + '</button>').join('')
-    $('app').dataset.tab = state.tab
+  function swapsOf(idx) {
+    const sc = state.scan[idx]
+    if (!sc) return []
+    const out = []
+    for (const e of sc.events) {
+      if (e.name !== 'Swap' || sc.ts[e.block] === undefined) continue
+      const buy = e.args[1], usdc = num(buy ? e.args[2] : e.args[3]), tok = num(buy ? e.args[3] : e.args[2])
+      out.push({ t: sc.ts[e.block], buy, usdc, tok, px: tok ? usdc / tok : num(e.args[4]), after: num(e.args[4]), who: e.args[0], tx: e.tx, block: e.block })
+    }
+    return out
+  }
+  function marketStats() {
+    const d = state.detail, idx = state.selected, t = now()
+    const pts = buildSeries(idx), sw = swapsOf(idx)
+    const last = d.saleClosed ? num(d.marketPrice) : null, nav = num(d.navPerToken)
+    const ref = pts.filter((p) => p.t <= t - 86400).pop() || pts[0]
+    const sc = state.scan[idx]
+    let valAt = null
+    if (sc) for (const e of sc.events) if ((e.name === 'InvestmentsMarked' || e.name === 'CapitalDeployed' || e.name === 'ProceedsReturned') && sc.ts[e.block] !== undefined) valAt = sc.ts[e.block]
+    return {
+      last, nav, ch: last && ref && ref.price ? last / ref.price - 1 : null,
+      prem: last ? gapOf(last, nav) : null,
+      vol: sw.filter((s) => s.t > t - 86400).reduce((a, s) => a + s.usdc, 0),
+      mcap: last ? num(d.outstandingSupply) * last : null, valAge: valAt == null ? null : t - valAt
+    }
+  }
+
+  // Write markup only when it changed: a control that is replaced under the pointer can swallow a click.
+  const PUT = (id) => ({ set h(html) { const el = $(id); if (el.__h !== html) { el.innerHTML = html; el.__h = html } } })
+
+  // ---------- top bar ----------
+  const TABS = [['trade', 'Trade'], ['funds', 'Funds'], ['reports', 'Reports'], ['portfolio', 'Portfolio'], ['govern', 'Govern']]
+  const ICON = {
+    trade: '<path d="M4 19V9M9 19V5M14 19v-7M19 19V8"/>',
+    funds: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><rect x="3" y="11" width="18" height="5" rx="1.5"/><path d="M5 20h14"/>',
+    reports: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>',
+    portfolio: '<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5V12l6 6"/>',
+    govern: '<path d="M4 20h16M6 20V10M10 20V10M14 20V10M18 20V10M3 10l9-6 9 6z"/>'
+  }
+  function renderTop() {
+    const tabBtn = (t, icon) => '<button data-tab="' + t[0] + '"' + (state.tab === t[0] ? ' aria-current="page"' : '') + '>' +
+      (icon ? '<svg viewBox="0 0 24 24" aria-hidden="true">' + ICON[t[0]] + '</svg>' : '') + t[1] + '</button>'
+    PUT('topnav').h = TABS.map((t) => tabBtn(t, false)).join('')
+    PUT('tabs').h = TABS.map((t) => tabBtn(t, true)).join('')
     document.querySelectorAll('main > section').forEach((s) => { s.hidden = s.dataset.view !== state.tab })
+    $('view').classList.toggle('wide', state.tab === 'trade' || state.tab === 'reports' || state.tab === 'portfolio')
+    const f = cur()
+    if (f) {
+      const live = f.price > 0n
+      PUT('fundsel').h = '<button class="fbtn" id="fbtn" aria-haspopup="dialog" aria-expanded="' + state.fsel + '">' + badge(state.selected, true) +
+        '<span class="fbt"><b>' + esc(f.symbol) + '</b><small>' + esc(f.name) + '</small></span><span class="fbp num">' +
+        (live ? usd(f.price) + ' <em class="' + (Number(f.premiumBps) >= 0 ? 'up' : 'dn') + '">' + pcs(Number(f.premiumBps) / 10000) + '</em>' : 'Sale $1.00') +
+        '</span><svg class="car" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></button>'
+    }
+    const fp = $('fpanel')
+    fp.hidden = !state.fsel
+    // Build the panel once per opening, then only refresh its list: rebuilding would drop the search focus.
+    if (!state.fsel) { if (fp.firstChild) fp.innerHTML = '' } else if (!fp.firstChild) { fp.innerHTML = fundPanel(); placePanel() } else PUT('f-list').h = fundList()
+  }
+  function fundRows() {
+    const q = state.fq.trim().toLowerCase(), m = state.me
+    return state.funds.map((f, i) => ({ f, i })).filter(({ f, i }) =>
+      (!q || (f.name + ' ' + f.symbol).toLowerCase().includes(q)) &&
+      (state.ff === 'all' || (state.ff === 'live' && f.saleClosed) || (state.ff === 'ipo' && !f.saleClosed) || (state.ff === 'held' && m && m.by[i] && m.by[i].token > 0n)))
+  }
+  function fundList() {
+    const rows = fundRows()
+    if (!rows.length) return '<div class="fempty">No fund matches.</div>'
+    return '<table class="ftab"><thead><tr><th class="l">Fund</th><th>Price</th><th>Vs NAV</th><th class="hm">NAV</th><th class="hm">Net assets</th><th>Status</th></tr></thead><tbody>' +
+      rows.map(({ f, i }) => '<tr data-fund="' + i + '" class="' + (i === state.selected ? 'on' : '') + '"><td class="l"><span class="fname">' + badge(i, true) + '<span><b>' + esc(f.symbol) +
+        '</b><small>' + esc(f.name) + '</small></span></span></td><td>' + (f.price > 0n ? usd(f.price) : '–') + '</td><td class="' + (Number(f.premiumBps) < 0 ? 'dn' : 'up') + '">' +
+        (f.price > 0n ? pcs(Number(f.premiumBps) / 10000) : '–') + '</td><td class="hm">' + usd(f.nav) + '</td><td class="hm">' + amt(f.netAssets) + '</td><td><span class="fst ' +
+        (f.saleClosed ? 'live">Live' : 'ipo">Sale open') + '</span></td></tr>').join('') + '</tbody></table>'
+  }
+  function fundPanel() {
+    const m = state.me
+    const n = (id) => state.funds.filter((f, i) => id === 'all' || (id === 'live' && f.saleClosed) || (id === 'ipo' && !f.saleClosed) || (id === 'held' && m && m.by[i] && m.by[i].token > 0n)).length
+    return '<div class="fpanel" role="dialog" aria-label="Choose a fund"><div class="fptop"><label class="fsearch"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>' +
+      '<input id="f-q" autocomplete="off" spellcheck="false" placeholder="Search funds" value="' + esc(state.fq) + '" aria-label="Search funds"></label><div class="fchips" role="group" aria-label="Filter">' +
+      [['all', 'All'], ['live', 'Live'], ['ipo', 'Sale open'], ['held', 'Held']].map((c) => '<button aria-pressed="' + (state.ff === c[0]) + '" data-ff="' + c[0] + '">' + c[1] + ' <span>' + n(c[0]) + '</span></button>').join('') +
+      '</div></div><div id="f-list" class="flist">' + fundList() + '</div><div class="fpfoot"><span><kbd>Esc</kbd> close</span><span class="grow"></span><span>Each fund is a separate contract with its own token, vault and pool.</span></div></div>'
+  }
+  function placePanel() {
+    const el = document.querySelector('.fpanel'), btn = $('fbtn')
+    if (!el || !btn) return
+    const r = btn.getBoundingClientRect(), w = Math.min(760, window.innerWidth - 24)
+    el.style.width = w + 'px'; el.style.right = 'auto'
+    el.style.left = Math.max(12, Math.min(r.left, window.innerWidth - w - 12)) + 'px'
+    el.style.top = (r.bottom + 8) + 'px'
   }
 
+  // ---------- Trade ----------
+  const RANGES = { '1H': 3600, '6H': 21600, '1D': 86400, 'All': Infinity }
+  let candleData = null
+  function candles() {
+    const idx = state.selected, pts = buildSeries(idx)
+    if (!pts.length) return null
+    const t1 = Math.max(now(), pts[pts.length - 1].t)
+    let t0 = RANGES[state.range] === Infinity ? pts[0].t : t1 - RANGES[state.range]
+    if (t1 - t0 < 120) t0 = t1 - 120
+    const N = 40, step = (t1 - t0) / N, sw = swapsOf(idx), out = []
+    const prev = pts.filter((p) => p.t < t0).pop() || pts[0]
+    let pc = prev.price, pn = prev.nav, j = 0, k = 0
+    while (j < pts.length && pts[j].t < t0) j++
+    while (k < sw.length && sw[k].t < t0) k++
+    for (let i = 0; i < N; i++) {
+      const a = t0 + i * step, b = a + step, lastOne = i === N - 1
+      let o = pc, h = pc, l = pc, c = pc, nav = pn, v = 0, n = 0
+      while (j < pts.length && (pts[j].t < b || lastOne)) { c = pts[j].price; h = Math.max(h, c); l = Math.min(l, c); nav = pts[j].nav; j++; n++ }
+      while (k < sw.length && (sw[k].t < b || lastOne)) { v += sw[k].usdc; k++ }
+      out.push({ t: a, o, h, l, c, nav, v, n, pre: b <= pts[0].t })
+      pc = c; pn = nav
+    }
+    return { cs: out, t0, t1 }
+  }
+  function ohlc(c, label) {
+    return '<span>' + esc(label) + '</span><span>O <b>' + c.o.toFixed(4) + '</b></span><span>H <b>' + c.h.toFixed(4) + '</b></span><span>L <b>' + c.l.toFixed(4) +
+      '</b></span><span>C <b>' + c.c.toFixed(4) + '</b></span><span class="tnavk">NAV <b>' + c.nav.toFixed(4) + '</b></span><span>Vol <b>' + cmp(c.v) + '</b></span>'
+  }
+  function renderChart() {
+    const d = state.detail
+    PUT('trng').h = Object.keys(RANGES).map((r) => '<button aria-pressed="' + (state.range === r) + '" data-range="' + r + '">' + r + '</button>').join('')
+    const cd = candleData = d.saleClosed ? candles() : null
+    if (!cd) { PUT('chartBox').h = '<p class="note">' + (d.saleClosed ? 'Loading price history…' : 'The chart starts when the sale closes and the market opens.') + '</p>'; PUT('tohlc').h = ''; return }
+    const cs = cd.cs.filter((c) => !c.pre)
+    const W = 860, H = 380, padR = 62, top = 14, ph = 280, vh = 56, gap = 12, N = cd.cs.length, iw = W - padR - 8, cw = iw / N
+    let lo = Math.min(...cs.map((c) => Math.min(c.l, c.nav))), hi = Math.max(...cs.map((c) => Math.max(c.h, c.nav)))
+    if (hi - lo < 0.02) { lo -= 0.02; hi += 0.02 }
+    const pad = (hi - lo) * 0.08; lo -= pad; hi += pad
+    const Y = (v) => top + (1 - (v - lo) / (hi - lo)) * ph, X = (i) => 4 + i * cw
+    const vmax = Math.max(...cs.map((c) => c.v), 1), v0 = top + ph + gap
+    let g = ''
+    for (let i = 0; i <= 4; i++) {
+      const v = lo + ((hi - lo) * i) / 4, y = Y(v)
+      g += '<line class="tg" x1="0" x2="' + (W - padR) + '" y1="' + y + '" y2="' + y + '"/><text class="tl" x="' + (W - padR + 6) + '" y="' + (y + 4) + '">' + v.toFixed(3) + '</text>'
+    }
+    const multi = cd.t1 - cd.t0 > 86400
+    for (let i = 0; i <= 3; i++) {
+      const t = cd.t0 + ((cd.t1 - cd.t0) * i) / 3
+      g += '<text class="tl" x="' + (4 + (iw * i) / 3) + '" y="' + (H - 2) + '" text-anchor="' + (i === 0 ? 'start' : i === 3 ? 'end' : 'middle') + '">' + esc(clock(t, multi)) + '</text>'
+    }
+    let navPath = '', body = ''
+    cd.cs.forEach((c, i) => {
+      if (c.pre) return
+      const x = X(i), mid = x + cw / 2, up = c.c >= c.o
+      const y1 = Y(Math.max(c.o, c.c)), hgt = Math.max(1.2, Math.abs(Y(c.o) - Y(c.c)))
+      navPath += (navPath ? ' L' : 'M') + mid + ',' + Y(c.nav)
+      body += '<g class="tc ' + (up ? 'up' : 'dn') + '" data-c="' + i + '"><line x1="' + mid + '" x2="' + mid + '" y1="' + Y(c.h) + '" y2="' + Y(c.l) + '"/>' +
+        '<rect x="' + (x + cw * 0.18) + '" y="' + y1 + '" width="' + (cw * 0.64) + '" height="' + hgt + '"/>' +
+        (c.v > 0 ? '<rect class="vb" x="' + (x + cw * 0.18) + '" y="' + (v0 + vh - (c.v / vmax) * vh) + '" width="' + (cw * 0.64) + '" height="' + ((c.v / vmax) * vh) + '"/>' : '') +
+        '<rect class="hit" x="' + x + '" y="' + top + '" width="' + cw + '" height="' + (ph + gap + vh) + '"/></g>'
+    })
+    const lastC = cs[cs.length - 1], yl = Y(lastC.c), upL = lastC.c >= lastC.nav
+    PUT('chartBox').h = '<svg id="chart" class="tsvg" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Market price candles and NAV per token">' + g + body +
+      '<path class="tnav" d="' + navPath + '"/><line class="tlast" x1="0" x2="' + (W - padR) + '" y1="' + yl + '" y2="' + yl + '"/>' +
+      '<rect class="ttag ' + (upL ? 'up' : 'dn') + '" x="' + (W - padR + 1) + '" y="' + (yl - 8) + '" width="' + (padR - 2) + '" height="16" rx="3"/><text class="ttagt" x="' + (W - padR + 6) + '" y="' + (yl + 4) + '">' + lastC.c.toFixed(4) + '</text></svg>'
+    PUT('tohlc').h = ohlc(lastC, 'now')
+  }
+  function chartHover(e) {
+    const g = e.target.closest && e.target.closest('.tc')
+    document.querySelectorAll('#chart .tc.hov').forEach((x) => x.classList.remove('hov'))
+    if (!candleData) return
+    if (!g) { const cs = candleData.cs.filter((c) => !c.pre); PUT('tohlc').h = ohlc(cs[cs.length - 1], 'now'); return }
+    g.classList.add('hov')
+    const c = candleData.cs[Number(g.dataset.c)]
+    PUT('tohlc').h = ohlc(c, clock(c.t, candleData.t1 - candleData.t0 > 86400))
+  }
+
+  function renderHead() {
+    const d = state.detail, f = cur(), s = marketStats()
+    const cell = (k, v, cls) => '<div><span>' + k + '</span><b' + (cls ? ' class="' + cls + '"' : '') + '>' + v + '</b></div>'
+    PUT('thead').h = '<button class="tmkt" data-open-funds="1" aria-label="Choose a fund">' + badge(state.selected) + '<span><b>' + esc(d.symbol) + '</b><small>' + esc(f.name) +
+      '</small></span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></button><div class="tstats">' +
+      cell('Last', px(s.last), s.ch == null || s.ch >= 0 ? 'up' : 'dn') +
+      cell('24h change', pcs(s.ch), s.ch == null || s.ch >= 0 ? 'up' : 'dn') +
+      cell('NAV per token', px(s.nav)) +
+      cell('Vs NAV', pcs(s.prem), s.prem == null || s.prem >= 0 ? 'up' : 'dn') +
+      cell('24h volume', '$' + cmp(s.vol)) +
+      cell('Market value', s.mcap == null ? '–' : '$' + cmp(s.mcap)) +
+      cell('Vault cash', '$' + cmp(num(d.vaultCash))) +
+      cell('Last GP valuation', s.valAge == null ? '–' : dur(s.valAge) + ' ago') + '</div>'
+  }
+
+  function renderBook() {
+    const d = state.detail, me = state.account
+    PUT('tpane').h = [['book', 'Pool depth'], ['trades', 'Trades']].map((p) => '<button aria-pressed="' + (state.pane === p[0]) + '" data-pane="' + p[0] + '">' + p[1] + '</button>').join('')
+    const body = PUT('tbookBody')
+    if (state.pane === 'trades') {
+      const t = swapsOf(state.selected).slice(-28).reverse()
+      body.h = t.length ? '<div class="bh"><span>Price</span><span>Size (' + esc(d.symbol) + ')</span><span>Time</span></div>' + t.map((x) => '<div class="tr ' + (x.buy ? 'bid' : 'ask') + '"><span class="p">' + x.px.toFixed(4) +
+        '</span><span>' + cmp(x.tok) + (me && x.who.toLowerCase() === me.toLowerCase() ? ' <em>you</em>' : '') + '</span><span>' + esc(clock(x.t)) + '</span></div>').join('')
+        : '<div class="bempty">No trades yet</div>'
+      return
+    }
+    const T = num(d.reserveToken), U = num(d.reserveUSDC)
+    if (!T || !U) { body.h = '<div class="bempty">The pool opens when the sale closes</div>'; return }
+    const k = T * U, P0 = U / T, nav = num(d.navPerToken), trig = num(d.buybackTriggerPrice)
+    const LV = [0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3]
+    const asks = [], bids = []
+    let pt = T, pu = U
+    for (const x of LV) { const P = P0 * (1 + x), tn = Math.sqrt(k / P), un = Math.sqrt(k * P); asks.push({ px: P, q: pt - tn, cum: un - U }); pt = tn }
+    pt = T
+    for (const x of LV) { const P = P0 * (1 - x), tn = Math.sqrt(k / P), un = Math.sqrt(k * P); bids.push({ px: P, q: tn - pt, cum: U - un }); pt = tn }
+    const mx = Math.max(asks[asks.length - 1].cum, bids[bids.length - 1].cum, 1)
+    const row = (r, side) => '<div class="br ' + side + '"><i style="width:' + ((r.cum / mx) * 100).toFixed(1) + '%"></i><span class="p">' + r.px.toFixed(4) + '</span><span>' + cmp(r.q) + '</span><span>' + cmp(r.cum) + '</span></div>'
+    let bidHtml = '', placed = false
+    for (const r of bids) {
+      if (!placed && trig >= r.px && trig < P0) { bidHtml += '<div class="lsep refl">buyback trigger ' + trig.toFixed(4) + '</div>'; placed = true }
+      bidHtml += row(r, 'bid')
+    }
+    const share = T ? (num(d.polTokens) / T) * 100 : 0
+    body.h = '<div class="bh"><span>Price</span><span>Size (' + esc(d.symbol) + ')</span><span>Total (mUSDC)</span></div><div class="basks">' + asks.slice().reverse().map((r) => row(r, 'ask')).join('') + '</div>' +
+      '<div class="bspread"><span>Pool</span><span>' + P0.toFixed(4) + '</span><span>' + (trig >= P0 ? 'buyback triggered' : '') + '</span><span class="bnav">NAV ' + nav.toFixed(4) + '</span></div>' +
+      '<div class="bbids">' + bidHtml + '</div><p class="bfoot">A pool has no order book. Each level shows how much it trades before its price reaches that level, before the 0.30% fee. The fund owns ' +
+      share.toFixed(0) + '% of this pool and cannot withdraw it.</p>'
+  }
+
+  function renderBottom() {
+    const d = state.detail, m = state.me, f = cur()
+    const tabs = [['balances', 'Balances'], ['mine', 'Trade history'], ['treasury', 'Treasury'], ['markets', 'Markets']]
+    PUT('ttabs').h = tabs.map((t) => '<button aria-pressed="' + (state.ttab === t[0]) + '" data-ttab="' + t[0] + '">' + t[1] + '</button>').join('')
+    let h = ''
+    if (state.ttab === 'balances') {
+      if (!m) h = '<p class="note">Connect a wallet to see its balances.</p>'
+      else {
+        h = '<table class="tt"><thead><tr><th class="l">Asset</th><th>Balance</th><th>Locked in vote</th><th>Price</th><th>Value at market</th><th>NAV</th><th>Value at NAV</th><th></th></tr></thead><tbody>' +
+          '<tr><td class="l"><b>mUSDC</b> <small>test money</small></td><td>' + amt(m.usdc) + '</td><td>–</td><td>1.0000</td><td>$' + amt(m.usdc) + '</td><td>–</td><td>–</td><td></td></tr>' +
+          state.funds.map((x, i) => { const b = m.by[i]; if (!b || (b.token === 0n && b.escrowed === 0n)) return ''
+            const all = num(b.token + b.escrowed), p = num(x.price), nv = num(x.nav)
+            return '<tr><td class="l"><b>' + esc(x.symbol) + '</b> <small>' + esc(x.name) + '</small></td><td>' + amt(b.token) + '</td><td>' + (b.escrowed > 0n ? amt(b.escrowed) : '–') + '</td><td>' +
+              (p ? p.toFixed(4) : '–') + '</td><td>' + (p ? '$' + cmp(all * p) : '–') + '</td><td>' + nv.toFixed(4) + '</td><td>$' + cmp(all * nv) + '</td><td><button class="tlink" data-go="trade" data-fund="' + i + '">Trade</button></td></tr>' }).join('') + '</tbody></table>'
+        if (!m.by.some((b) => b.token > 0n || b.escrowed > 0n)) h += '<p class="note">No fund tokens in this wallet yet.</p>'
+      }
+    } else if (state.ttab === 'mine') {
+      const me = state.account, t = me ? swapsOf(state.selected).filter((x) => x.who.toLowerCase() === me.toLowerCase()).reverse() : []
+      h = t.length ? '<table class="tt"><thead><tr><th class="l">Time</th><th class="l">Side</th><th>Price</th><th>Size (' + esc(d.symbol) + ')</th><th>mUSDC</th><th>Pool price after</th><th></th></tr></thead><tbody>' +
+        t.map((x) => '<tr><td class="l">' + esc(clock(x.t, true)) + '</td><td class="l ' + (x.buy ? 'up' : 'dn') + '">' + (x.buy ? 'Buy' : 'Sell') + '</td><td>' + x.px.toFixed(4) + '</td><td>' + cmp(x.tok) + '</td><td>' + cmp(x.usdc) +
+          '</td><td>' + x.after.toFixed(4) + '</td><td><a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/tx/' + esc(x.tx) + '">tx</a></td></tr>').join('') + '</tbody></table>'
+        : '<p class="note">' + (me ? 'This wallet has not traded ' + esc(d.symbol) + ' in the pool yet.' : 'Connect a wallet to see its trades.') + '</p>'
+    } else if (state.ttab === 'treasury') {
+      const below = d.saleClosed && d.marketPrice < d.buybackTriggerPrice
+      const r = (k, v) => '<tr><td class="l">' + k + '</td><td class="l">' + v + '</td></tr>'
+      h = '<table class="tt kv"><tbody>' + r('Vault cash', amt(d.vaultCash) + ' mUSDC') + r('Fund-owned liquidity', amt(d.polTokens) + ' ' + esc(d.symbol) + ' + ' + amt(d.polCash) + ' mUSDC, cannot be withdrawn') +
+        r('Invested value', amt(d.investedValue) + ' mUSDC <span class="pill warn">GP-reported</span>') + r('Buyback trigger', usd(d.buybackTriggerPrice) + (below ? ' <span class="pill warn">triggered</span>' : ' · not triggered')) +
+        r('Maximum buyback now', amt(d.maxBuyback) + ' mUSDC (1% of vault cash)') + r('Follow-on', d.followOnRemaining > 0n ? amt(d.followOnRemaining) + ' ' + esc(d.symbol) + ' at ' + usd(d.issuePrice) : 'none open') +
+        r('Fee tranches minted', d.feeTranchesMinted + ' of 10') + '</tbody></table><p class="note">The rules and the buttons that anyone can press are under Funds › Rules.</p>'
+    } else {
+      h = '<table class="tt"><thead><tr><th class="l">Fund</th><th>Price</th><th>Vs NAV</th><th>NAV</th><th>Net assets</th><th class="l">Status</th><th></th></tr></thead><tbody>' +
+        state.funds.map((x, i) => '<tr><td class="l"><b>' + esc(x.symbol) + '</b> <small>' + esc(x.name) + '</small></td><td>' + (x.price > 0n ? num(x.price).toFixed(4) : '–') + '</td><td class="' + (Number(x.premiumBps) < 0 ? 'dn' : 'up') + '">' +
+          (x.price > 0n ? pcs(Number(x.premiumBps) / 10000) : '–') + '</td><td>' + num(x.nav).toFixed(4) + '</td><td>' + amt(x.netAssets) + '</td><td class="l">' + (x.saleClosed ? 'Live' : 'Sale open') +
+          '</td><td><button class="tlink" data-go="trade" data-fund="' + i + '">' + (i === state.selected ? 'Selected' : 'Trade') + '</button></td></tr>').join('') + '</tbody></table>'
+    }
+    PUT('tbody').h = h
+  }
+
+  function renderIpo() {
+    const d = state.detail, f = cur()
+    const p = Number((d.sold * 10000n) / SALE_CAP) / 100
+    PUT('ipoStatus').h = '<div class="sechead"><h3>' + esc(f.name) + ': primary sale</h3><span class="pill ipo">Sale open</span></div>' +
+      '<p class="lead">New tokens from the fund at a fixed $1.00. This is the only issue: no capital calls later. When the sale closes, 5% of supply plus the same cash become fund-owned liquidity and the market opens at $1.00.</p>' +
+      '<dl class="kv"><dt>Price</dt><dd>$1.0000</dd><dt>Sold</dt><dd>' + amt(d.sold) + ' of 9,500,000 ' + esc(d.symbol) + ' (' + p.toFixed(1) + '%)</dd></dl><div class="meter"><i class="infoc" style="width:' + Math.min(100, p) + '%"></i></div>'
+  }
+
+  // ---------- Funds ----------
   function renderFunds() {
-    $('funds').innerHTML = state.funds.map((f, i) =>
-      '<button class="row' + (i === state.selected ? ' on' : '') + '" data-i="' + i + '"><span class="badge">' + esc(letter(f.name)) + '</span>' +
-      '<span class="grow"><span class="t">' + esc(f.name) + '</span><span class="d">Net assets ' + amt(f.netAssets) + ' mUSDC · market ' +
-      (f.price === 0n ? 'not open' : usd(f.price)) + '</span></span>' +
-      '<span class="r"><span class="t num">' + usd(f.nav) + '</span><span class="d">' + gapPill(f.price, f.premiumBps) + '</span></span></button>').join('')
-  }
-
-  function renderHero() {
-    const d = state.detail, f = state.funds[state.selected], open = d.saleClosed
-    $('hero').innerHTML = '<div class="sechead"><h1>' + esc(f.name) + '</h1>' + gapPill(open ? d.marketPrice : 0n, d.premiumBps) + '</div>' +
-      '<h2 style="margin-top:14px">NAV per token</h2><div class="big">' + usd(d.navPerToken) + '</div>' +
-      '<div class="sub">Market <b class="num">' + (open ? usd(d.marketPrice) : '–') + '</b> · net assets <b class="num">' + amt(d.netAssets) + '</b> mUSDC' +
-      (d.netAssets === 0n ? ' · no assets yet, NAV shows the $1.00 issue price' : '') + '</div>' +
-      '<div class="ids">' + esc(d.symbol) + ' · fund ' + link(f.fund) + ' · GP ' + link(d.gp) + '</div>'
-    $('strip').innerHTML = '<b>' + esc(d.symbol) + '</b><span>NAV <span class="num">' + usd(d.navPerToken) + '</span></span><span>Mkt <span class="num">' +
-      (open ? usd(d.marketPrice) : '–') + '</span></span>' + gapPill(open ? d.marketPrice : 0n, d.premiumBps)
+    PUT('funds').h = state.funds.map((f, i) => '<button class="row" data-i="' + i + '"' + (i === state.selected ? ' aria-current="true"' : '') + '>' + badge(i) +
+      '<span class="grow"><span class="t">' + esc(f.name) + '</span> ' + (f.saleClosed ? '<span class="pill live">Live</span>' : '<span class="pill ipo">Sale open</span>') +
+      (i === state.selected ? ' <span class="pill okp">selected</span>' : '') + '<br><span class="d num">' + esc(f.symbol) + ' · NAV ' + usd(f.nav) + ' · net assets ' + amt(f.netAssets) + ' mUSDC</span></span>' +
+      '<span class="r"><span class="t num">' + (f.price > 0n ? usd(f.price) : '$1.0000') + '</span><br><span class="d ' + (f.price > 0n && Number(f.premiumBps) < -300 ? 'down' : 'mut') + '">' +
+      (f.price > 0n ? pcs(Number(f.premiumBps) / 10000) + ' vs NAV' : 'issue price') + '</span></span></button>').join('')
+    const d = state.detail, f = cur()
     $('fundTitle').textContent = f.name
+    PUT('fundIds').h = d ? 'fund ' + link(f.fund) + ' · GP ' + link(d.gp) : ''
+    PUT('subSeg').h = [['overview', 'Overview'], ['rules', 'Rules'], ['manager', 'Manager']].map((s) => '<button aria-pressed="' + (state.sub === s[0]) + '" data-sub-tab="' + s[0] + '">' + s[1] + '</button>').join('')
+    document.querySelectorAll('[data-sub]').forEach((el) => { el.hidden = el.dataset.sub !== state.sub })
   }
-
   const cell = (k, v, s) => '<div><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="s">' + (s || '&nbsp;') + '</div></div>'
   function renderKpis() {
-    const d = state.detail, s = esc(d.symbol)
+    const d = state.detail, s = esc(d.symbol), open = d.saleClosed
     const share = d.netAssets > 0n ? Number((d.investedValue * 10000n) / d.netAssets) / 100 : 0
-    $('kpis').innerHTML =
+    PUT('kpis').h =
+      cell('NAV per token', usd(d.navPerToken), d.netAssets === 0n ? 'no assets yet: the $1.00 issue price' : 'net assets / outstanding supply') +
+      cell('Market price', open ? usd(d.marketPrice) : '–', open ? gapText(Number(d.premiumBps)) + ' vs NAV' : 'market opens when the sale closes') +
       cell('Net assets', amt(d.netAssets), 'mUSDC') +
       cell('Vault cash', amt(d.vaultCash), 'mUSDC, read on-chain') +
       cell('Invested value', amt(d.investedValue), '<span class="pill warn">GP-reported</span> ' + share.toFixed(1) + '% of net assets') +
       cell('Outstanding supply', amt(d.outstandingSupply), s + ', excl. fund-owned pool tokens') +
-      cell('Pool reserves', d.saleClosed ? amt(d.reserveToken) + ' / ' + amt(d.reserveUSDC) : '–', d.saleClosed ? s + ' / mUSDC' : 'opens when the sale closes') +
-      cell('Fund-owned liquidity', d.saleClosed ? amt(d.polTokens) + ' / ' + amt(d.polCash) : '–', d.saleClosed ? s + ' / mUSDC, cannot be withdrawn' : 'created when the sale closes')
+      cell('Pool reserves', open ? amt(d.reserveToken) + ' / ' + amt(d.reserveUSDC) : '–', open ? s + ' / mUSDC' : 'opens when the sale closes') +
+      cell('Fund-owned liquidity', open ? amt(d.polTokens) + ' / ' + amt(d.polCash) : '–', open ? s + ' / mUSDC, cannot be withdrawn' : 'created when the sale closes')
   }
+  const gapText = (bps) => (bps < 0 ? 'discount ' : 'premium ') + pct(Math.abs(bps))
 
   // One entry per rule: [state of the lamp, status html]. 'off' = needs attention or can be acted on now.
   const RULES = [
@@ -427,16 +689,8 @@
       const [cls, html] = ruleStatus(r.k)
       row.className = 'light' + (cls === 'ok' ? '' : ' ' + cls)
       const st = row.querySelector('.st')
-      if (st.innerHTML !== html) st.innerHTML = html
+      if (st.__h !== html) { st.innerHTML = html; st.__h = html }
     }
-    const d = state.detail, t = now()
-    let gov = '<dl class="kv"><dt>Current GP</dt><dd>' + link(d.gp) + '</dd><dt>Eligible supply</dt><dd>' + amt(d.eligibleSupply) + ' ' + esc(d.symbol) + '</dd>'
-    if (d.voteActive) {
-      const share = d.eligibleSupply > 0n ? Number((d.yesVotes * 10000n) / d.eligibleSupply) / 100 : 0
-      gov += '<dt>Vote #' + d.proposalId + '</dt><dd>replace with ' + link(d.proposedGP) + '</dd><dt>Yes votes</dt><dd>' + amt(d.yesVotes) + ' (' + share.toFixed(1) + '%)</dd><dt>Closes in</dt><dd>' + dur(Number(d.voteDeadline) - t) + '</dd></dl>' +
-        '<div class="meter"><i style="width:' + Math.min(100, share) + '%"></i><b style="left:50%"></b></div><p class="note">The marker is the threshold: more than 50% of eligible supply.</p>'
-    } else gov += '<dt>Vote</dt><dd>none running</dd><dt>Voting period</dt><dd>' + dur(state.voting) + '</dd></dl>'
-    if ($('govBox').innerHTML !== gov) $('govBox').innerHTML = gov
   }
 
   function describe(ev, s) {
@@ -462,97 +716,145 @@
     }
   }
 
-  function renderFeed() {
-    const sc = state.scan[state.selected], s = state.detail.symbol
-    if (!sc) { $('feed').innerHTML = '<div class="row"><span class="d">Loading history…</span></div>'; return }
+  // ---------- Reports ----------
+  function renderReports() {
+    const d = state.detail, f = cur(), sc = state.scan[state.selected], s = esc(d.symbol), m = state.me
+    const ev = sc ? sc.events : []
+    const sum = (name, i) => ev.reduce((a, e) => (e.name === name ? a + e.args[i] : a), 0n)
+    const when = (e) => (sc && sc.ts[e.block] !== undefined ? clock(sc.ts[e.block], true) : 'block ' + e.block)
+    const txl = (e) => '<a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/tx/' + esc(e.tx) + '">tx</a>'
+    const primary = sum('Purchased', 1)
+    const followOn = ev.reduce((a, e) => (e.name === 'FollowOnSubscribed' ? a + (e.args[1] * e.args[2] + 10n ** 6n - 1n) / 10n ** 6n : a), 0n)
+    const deployed = sum('CapitalDeployed', 1), returned = sum('ProceedsReturned', 1)
+    const bbSpent = sum('BuybackExecuted', 1), bbBurned = sum('BuybackExecuted', 2)
+    const feeTok = sum('ManagementFeeMinted', 1), feeClaimed = sum('Claimed', 1)
+    const gain = d.investedValue + returned - deployed
+    const sg = (x) => (x < 0n ? '−' + amt(-x) : amt(x))
+    const neg = (x) => (x === 0n ? '0' : '−' + amt(x))
+    const tile = (k, v, sub) => '<div><span class="k">' + k + '</span><span class="v">' + v + '</span><span class="s">' + (sub || '&nbsp;') + '</span></div>'
+    const open = d.saleClosed
+    let h = '<div class="sec"><div class="crumbs"><button data-tab="funds">Funds</button><i>›</i><span>' + esc(f.name) + '</span><i>›</i><span>Report</span></div>' +
+      '<h1>' + esc(f.name) + ': fund report</h1><p class="lead">As of block ' + state.block.toLocaleString('en-US') + ', ' + esc(clock(state.chainTime, true)) + '. Every figure is read from the contracts or added up from their events.</p></div>' +
+      (sc && sc.failed ? '<p class="dq">The event history could not be fully loaded from the public endpoint. Totals built from events may be incomplete; balances and NAV are unaffected.</p>' : '') +
+      '<div class="rtiles">' +
+      tile('Net assets', amt(d.netAssets), 'mUSDC') + tile('NAV per token', usd(d.navPerToken), 'net assets / outstanding supply') +
+      tile('Market price', open ? usd(d.marketPrice) : '–', open ? gapText(Number(d.premiumBps)) + ' vs NAV' : 'market not open') +
+      tile('Invested value', amt(d.investedValue), '<span class="pill warn">GP-reported</span>') +
+      tile('Vault cash', amt(d.vaultCash), 'mUSDC, on-chain') + tile('Value created', sg(gain), 'reported value + proceeds − cost') +
+      tile('Buybacks', amt(bbSpent), amt(bbBurned) + ' ' + s + ' burned') + tile('Fee tokens minted', amt(feeTok), d.feeTranchesMinted + ' of 10 tranches') + '</div>'
+
+    const fr = (k, v, cls, note) => '<tr class="' + (cls || '') + '"><td>' + k + (note ? ' <small>' + note + '</small>' : '') + '</td><td class="num">' + v + '</td></tr>'
+    h += '<div class="rgrid"><div class="rsec"><div class="sechead"><h2>Statement of net assets</h2><small>mUSDC</small></div><div class="rtab"><table class="fin"><tbody>' +
+      '<tr class="hd"><td colspan="2">Assets</td></tr>' +
+      fr('Vault cash', amt(d.vaultCash), '', 'read on-chain') +
+      fr('Cash in the fund-owned pool position', amt(d.polCash), '', 'read on-chain') +
+      fr('Investments', amt(d.investedValue), '', 'reported by the GP') +
+      fr('Net assets', amt(d.netAssets), 't') +
+      '<tr class="hd"><td colspan="2">Tokens (' + s + ')</td></tr>' +
+      fr('Total supply', amt(d.totalSupply)) + fr('Less: fund-owned tokens in the pool', neg(d.polTokens), '', 'treasury stock') +
+      fr('Outstanding supply', amt(d.outstandingSupply), 's') + fr('NAV per token', usd(d.navPerToken), 't') + '</tbody></table></div></div>'
+
+    h += '<div class="rsec"><div class="sechead"><h2>Capital account since launch</h2><small>from events, mUSDC</small></div><div class="rtab"><table class="fin"><tbody>' +
+      '<tr class="hd"><td colspan="2">Money in</td></tr>' +
+      fr('Primary sale at $1.00', amt(primary)) + fr('Follow-on subscriptions', amt(followOn)) + fr('Exit proceeds returned', amt(returned)) +
+      '<tr class="hd"><td colspan="2">Money out</td></tr>' +
+      fr('Capital deployed into investments', neg(deployed)) + fr('Buybacks (tokens burned)', neg(bbSpent), '', amt(bbBurned) + ' ' + s) +
+      fr('Distributions to investors', '0', '', 'by design: nothing is paid out') +
+      '<tr class="hd"><td colspan="2">Portfolio (GP-reported)</td></tr>' +
+      fr('Cost deployed', amt(deployed)) + fr('Proceeds returned', amt(returned)) + fr('Reported value today', amt(d.investedValue)) + fr('Value created', sg(gain), 't') + '</tbody></table></div></div></div>'
+
+    const deals = ev.filter((e) => e.name === 'CapitalDeployed' || e.name === 'ProceedsReturned' || e.name === 'InvestmentsMarked')
+    h += '<div class="rsec"><div class="sechead"><h2>Investments and valuations</h2><small>what the contract records</small></div>' +
+      (deals.length ? '<div class="rtab"><table class="rt"><thead><tr><th class="l">Time</th><th class="l">Event</th><th class="l">Memo</th><th>Amount</th><th>Reported value after</th><th></th></tr></thead><tbody>' +
+        (() => { let val = 0n; return deals.map((e) => {
+          let kind, memo = '', amount = ''
+          if (e.name === 'CapitalDeployed') { val += e.args[1]; kind = 'Capital deployed to ' + short(e.args[0]); memo = e.args[2]; amount = '−' + amt(e.args[1]) }
+          else if (e.name === 'ProceedsReturned') { val = e.args[2]; kind = 'Proceeds returned'; amount = '+' + amt(e.args[1]) }
+          else { val = e.args[1]; kind = 'Revaluation by the GP'; memo = e.args[2]; amount = sg(e.args[1] - e.args[0]) }
+          return '<tr><td class="l">' + esc(when(e)) + '</td><td class="l">' + esc(kind) + '</td><td class="l">' + esc(memo) + '</td><td>' + amount + '</td><td>' + amt(val) + '</td><td>' + txl(e) + '</td></tr>'
+        }).join('') })() + '</tbody></table></div>'
+        : '<p class="note">No capital has been deployed and no valuation reported yet.</p>') +
+      '<p class="dq">The contracts hold one number for the whole portfolio and a memo per transaction. There are no company-level statements on-chain, so this report cannot show any.</p></div>'
+
+    const share = d.totalSupply > 0n ? Number((feeTok * 10000n) / d.totalSupply) / 100 : 0
+    h += '<div class="rgrid"><div class="rsec"><div class="sechead"><h2>Manager fee</h2><small>' + s + '</small></div><div class="rtab"><table class="fin"><tbody>' +
+      fr('Tranches minted', d.feeTranchesMinted + ' of 10') + fr('Fee tokens minted', amt(feeTok), '', share.toFixed(2) + '% of total supply') +
+      fr('Locked in vesting', amt(d.unvested)) + fr('Vested, not yet claimed', amt(d.claimable)) + fr('Claimed by the GP', amt(feeClaimed)) + '</tbody></table></div></div>'
+    if (m) {
+      const all = m.token + m.escrowed
+      const own = d.outstandingSupply > 0n ? Number((all * 1000000n) / d.outstandingSupply) / 10000 : 0
+      h += '<div class="rsec"><div class="sechead"><h2>Your position</h2><small>' + esc(short(state.account)) + '</small></div><div class="rtab"><table class="fin"><tbody>' +
+        fr('Tokens held', amt(m.token)) + fr('Tokens locked in a vote', amt(m.escrowed)) + fr('Share of outstanding supply', own.toFixed(2) + '%') +
+        fr('Value at NAV', amt((all * d.navPerToken) / 10n ** 6n)) + fr('Value at market price', open ? amt((all * d.marketPrice) / 10n ** 6n) : '–') + '</tbody></table></div></div>'
+    } else h += '<div class="rsec"><div class="sechead"><h2>Your position</h2></div><p class="note">Connect a wallet to see its share of this fund.</p></div>'
+    h += '</div>'
+
     const items = []
-    for (let i = sc.events.length - 1; i >= 0 && items.length < 20; i--) {
-      const ev = sc.events[i]
-      const text = describe(ev, s)
-      if (!text) continue
-      const t = sc.ts[ev.block]
-      items.push('<div class="row"><span class="grow"><span class="t" style="font-weight:500">' + esc(text) + '</span><span class="d">' + (t !== undefined ? esc(clock(t, true)) + ' · ' : '') +
-        '<a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/tx/' + esc(ev.tx) + '">block ' + ev.block + '</a></span></span></div>')
+    for (let i = ev.length - 1; i >= 0 && items.length < 30; i--) {
+      const text = describe(ev[i], d.symbol)
+      if (text) items.push('<tr><td class="l">' + esc(when(ev[i])) + '</td><td class="l" style="white-space:normal">' + esc(text) + '</td><td>' + txl(ev[i]) + '</td></tr>')
     }
-    $('feed').innerHTML = (sc.failed ? '<div class="row"><span class="d">Event history could not be fully loaded from the public endpoint.</span></div>' : '') +
-      (items.length ? items.join('') : '<div class="row"><span class="d">No activity in this sub-fund yet.</span></div>')
-  }
-
-  function renderFooter() {
-    const f = state.funds[state.selected]
-    $('footNet').textContent = CFG.network
+    h += '<div class="rsec"><div class="sechead"><h2>Event log</h2><small>newest first</small></div>' + (items.length ? '<div class="rtab" id="feed"><table class="rt"><tbody>' + items.join('') + '</tbody></table></div>'
+      : '<p class="note" id="feed">' + (sc ? 'No activity in this sub-fund yet.' : 'Loading history…') + '</p>') + '</div>'
     const rows = [['Umbrella', CFG.umbrella], ['mUSDC', CFG.usdc], ['Fund', f.fund], ['Token', f.token], ['Pool', f.pool], ['Vesting', f.vesting]]
-    $('addrs').innerHTML = rows.map((r) => '<dt>' + r[0] + '</dt><dd><a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/address/' + esc(r[1]) + '">' + esc(r[1]) + '</a></dd>').join('')
+    h += '<div class="rsec"><div class="sechead"><h2>Contracts</h2><small>' + esc(CFG.network) + '</small></div><div class="card"><dl class="kv" id="addrs">' +
+      rows.map((r) => '<dt>' + r[0] + '</dt><dd><a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/address/' + esc(r[1]) + '">' + esc(r[1]) + '</a></dd>').join('') + '</dl></div></div>'
+    PUT('reports').h = h
   }
 
-  // ---------- chart ----------
-  const CH = { w: 480, h: 240, l: 46, r: 8, t: 10, b: 22 }
-  let chartPts = []
-  function renderChart() {
-    const svg = $('chart')
-    const d = state.detail
-    const pts = chartPts = buildSeries(state.selected)
-    if (!d.saleClosed || !pts.length) {
-      svg.innerHTML = '<text class="msg" x="240" y="124" text-anchor="middle">' +
-        (d.saleClosed ? 'Loading price history…' : 'The chart starts when the sale closes and the market opens.') + '</text>'
-      svg._scale = null
-      $('chartRead').textContent = ''
-      return
+  // ---------- Portfolio ----------
+  function renderPortfolio() {
+    const m = state.me
+    let h = '<section class="pfhead"><div><h1>Portfolio</h1><p class="lead">' + (state.account ? 'Wallet ' + link(state.account) + ' · values at the pool price' : 'No wallet connected') + '</p></div></section>'
+    if (!m) {
+      h += '<div class="tp pfnone">' + (window.ethereum ? 'Connect a wallet on ' + esc(CFG.network) + ' to see its holdings.' : 'This browser has no wallet. Reading works without one; holdings need MetaMask.') + '</div>'
+    } else {
+      let vm = 0, vn = 0, held = 0
+      const rows = state.funds.map((f, i) => { const b = m.by[i]; const all = num(b.token + b.escrowed); if (!all) return ''
+        held++; const p = num(f.price) || 1, nv = num(f.nav); vm += all * p; vn += all * nv
+        return '<tr class="click" data-fund="' + i + '"><td class="l"><b>' + esc(f.symbol) + '</b> <small>' + esc(f.name) + '</small></td><td>' + amt(b.token) + '</td><td>' + (b.escrowed > 0n ? amt(b.escrowed) : '–') + '</td><td>' +
+          (f.price > 0n ? num(f.price).toFixed(4) : '1.0000 <small>issue</small>') + '</td><td>$' + cmp(all * p) + '</td><td>' + nv.toFixed(4) + '</td><td>$' + cmp(all * nv) + '</td><td>' + (b.isGP ? '<span class="pill warn">GP</span>' : '') + '</td></tr>' }).join('')
+      const cash = num(m.usdc), total = cash + vm
+      const stat = (k, v, sub) => '<div class="pfs"><span>' + k + '</span><b class="num">' + v + '</b>' + (sub ? '<small class="num">' + sub + '</small>' : '') + '</div>'
+      h += '<section class="pfgrid"><div class="pfcol tp">' + stat('Account value', '$' + cmp(total), 'cash plus tokens at the pool price') +
+        stat('Tokens at market', '$' + cmp(vm), held + (held === 1 ? ' fund' : ' funds')) + stat('Tokens at NAV', '$' + cmp(vn), vm ? pcs(vm / vn - 1) + ' market vs NAV' : '–') +
+        stat('Cash (mUSDC)', '$' + cmp(cash), 'test money') + stat('Locked in votes', cmp(m.by.reduce((a, b) => a + num(b.escrowed), 0)), 'tokens') + '</div>' +
+        '<div class="tp pftabs"><div class="ttabs"><button aria-pressed="true">Holdings</button></div><div class="pftb">' +
+        (held ? '<table class="tt"><thead><tr><th class="l">Fund</th><th>Balance</th><th>Locked</th><th>Price</th><th>Value at market</th><th>NAV</th><th>Value at NAV</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+          : '<p class="note pfpad">No fund tokens in this wallet yet. Get test mUSDC below, then buy in a primary sale or in a pool.</p>') + '</div></div></section>'
     }
-    const tEnd = Math.max(now(), pts[pts.length - 1].t)
-    let t0 = pts[0].t
-    if (tEnd - t0 < 60) t0 = tEnd - 60
-    let lo = Infinity, hi = -Infinity
-    for (const p of pts) { lo = Math.min(lo, p.nav, p.price); hi = Math.max(hi, p.nav, p.price) }
-    if (hi - lo < 0.02) { lo -= 0.02; hi += 0.02 }
-    const pad = (hi - lo) * 0.1; lo -= pad; hi += pad
-    const X = (t) => CH.l + ((t - t0) / (tEnd - t0)) * (CH.w - CH.l - CH.r)
-    const Y = (v) => CH.t + (1 - (v - lo) / (hi - lo)) * (CH.h - CH.t - CH.b)
-    let g = ''
-    for (let i = 0; i <= 4; i++) {
-      const v = lo + ((hi - lo) * i) / 4, y = Y(v)
-      g += '<line class="g" x1="' + CH.l + '" x2="' + (CH.w - CH.r) + '" y1="' + y + '" y2="' + y + '"/>' +
-        '<text class="lb" x="' + (CH.l - 6) + '" y="' + (y + 3) + '" text-anchor="end">$' + v.toFixed(3) + '</text>'
-    }
-    const multiDay = tEnd - t0 > 86400
-    for (let i = 0; i <= 2; i++) {
-      const t = t0 + ((tEnd - t0) * i) / 2
-      g += '<text class="lb" x="' + X(t) + '" y="' + (CH.h - 6) + '" text-anchor="' + (i === 0 ? 'start' : i === 2 ? 'end' : 'middle') + '">' + esc(clock(t, multiDay)) + '</text>'
-    }
-    let navPath = '', pricePath = '', bands = ''
-    pts.forEach((p, i) => {
-      const x = X(Math.max(p.t, t0)), xn = i + 1 < pts.length ? X(Math.max(pts[i + 1].t, t0)) : X(tEnd)
-      navPath += (i ? ' V' + Y(p.nav) : 'M' + x + ',' + Y(p.nav)) + ' H' + xn
-      pricePath += (i ? ' V' + Y(p.price) : 'M' + x + ',' + Y(p.price)) + ' H' + xn
-      const y1 = Math.min(Y(p.nav), Y(p.price)), hgt = Math.abs(Y(p.nav) - Y(p.price))
-      if (hgt > 0.5 && xn > x) bands += '<rect class="gap' + (p.price < p.nav ? '' : ' pos') + '" x="' + x + '" y="' + y1 + '" width="' + (xn - x) + '" height="' + hgt + '"/>'
+    PUT('pf').h = h
+  }
+
+  // ---------- Govern ----------
+  function renderGovern() {
+    const d = state.detail, f = cur(), t = now()
+    let h = '<section class="sec"><h2>Open decisions</h2>', n = 0
+    state.funds.forEach((x, i) => {
+      if (!x.voteActive) return
+      n++
+      const share = x.eligibleSupply > 0n ? Number((x.yesVotes * 10000n) / x.eligibleSupply) / 100 : 0
+      h += '<div class="card' + (i === state.selected ? ' hi' : '') + '"><div class="sechead"><h3>' + esc(x.symbol) + ': replace the GP with ' + esc(short(x.proposedGP)) + '</h3><span class="pill live">vote #' + x.proposalId + '</span></div>' +
+        '<dl class="kv"><dt>Current GP</dt><dd>' + link(x.gp) + '</dd><dt>Yes votes</dt><dd>' + amt(x.yesVotes) + ' of ' + amt(x.eligibleSupply) + ' eligible (' + share.toFixed(1) + '%)</dd><dt>Closes in</dt><dd>' + dur(Number(x.voteDeadline) - t) + '</dd></dl>' +
+        '<div class="meter"><i style="width:' + Math.min(100, share) + '%"></i><b style="left:50%"></b></div><p class="note">The marker is the threshold: more than 50% of eligible supply. ' +
+        (i === state.selected ? 'Vote and execute below.' : '<button class="tlink" data-fund="' + i + '">Select this fund to vote</button>') + '</p></div>'
     })
-    svg.innerHTML = g + bands + '<path class="bid" d="' + pricePath + '"/><path class="nav" d="' + navPath + '"/>' +
-      '<line id="guide" class="guide" y1="' + CH.t + '" y2="' + (CH.h - CH.b) + '" visibility="hidden"/>'
-    svg._scale = { t0, tEnd }
-    readout(pts[pts.length - 1], true)
-  }
-  function readout(p, latest) {
-    const gap = Math.trunc((p.price / p.nav - 1) * 10000) / 100 // truncated like premiumBps() in the contract
-    $('chartRead').textContent = (latest ? 'now' : clock(p.t, true)) + ' · NAV $' + p.nav.toFixed(4) + ' · mkt $' + p.price.toFixed(4) +
-      ' · ' + (gap < 0 ? 'discount ' : 'premium ') + Math.abs(gap).toFixed(2) + '%'
-  }
-  function chartHover(e) {
-    const svg = $('chart'), sc = svg._scale
-    if (!sc || !chartPts.length) return
-    const box = svg.getBoundingClientRect()
-    const x = ((e.clientX - box.left) / box.width) * CH.w
-    const t = sc.t0 + ((x - CH.l) / (CH.w - CH.l - CH.r)) * (sc.tEnd - sc.t0)
-    let p = chartPts[0]
-    for (const q of chartPts) if (q.t <= t) p = q
-    const guide = svg.querySelector('#guide')
-    if (guide && x >= CH.l && x <= CH.w - CH.r) { guide.setAttribute('x1', x); guide.setAttribute('x2', x); guide.setAttribute('visibility', 'visible') }
-    readout(p, false)
-  }
-  function chartLeave() {
-    const guide = $('chart').querySelector('#guide')
-    if (guide) guide.setAttribute('visibility', 'hidden')
-    if (chartPts.length) readout(chartPts[chartPts.length - 1], true)
+    if (!n) h += '<p class="note">Nothing is waiting. A vote appears here as soon as a token holder proposes a new GP.</p>'
+    h += '</section>'
+    PUT('gov').h = h
+
+    const sc = state.scan[state.selected]
+    const marks = sc ? sc.events.filter((e) => e.name === 'InvestmentsMarked') : []
+    let g = '<section class="sec"><div class="sechead"><h2>Valuations</h2><small>' + esc(f.name) + '</small></div>' +
+      (marks.length ? '<div class="list">' + marks.slice(-8).reverse().map((e) => '<div class="row"><span class="grow"><span class="t">' + esc(e.args[2] || 'Revaluation') + '</span><br><span class="d num">' + amt(e.args[0]) + ' → ' + amt(e.args[1]) +
+        (e.args[0] > 0n ? ' (' + pcs(num(e.args[1]) / num(e.args[0]) - 1) + ')' : '') + '</span><br><span class="d">' + esc(sc.ts[e.block] !== undefined ? clock(sc.ts[e.block], true) : 'block ' + e.block) + ' · reported by the GP</span></span></div>').join('') + '</div>'
+        : '<p class="note">The GP has not reported a valuation for this fund yet.</p>') +
+      '<p class="dq">In this prototype a valuation takes effect at once and cannot be disputed. The only check on the GP is removal by vote.</p></section>' +
+      '<section class="sec"><div class="sechead"><h2>Managers</h2><small>one GP per sub-fund</small></div><div class="list">' +
+      state.funds.map((x, i) => '<div class="row">' + badge(i) + '<span class="grow"><span class="t">' + esc(x.name) + '</span><br><span class="d">GP ' + link(x.gp) + '</span></span><span class="r"><span class="d">' +
+        (x.voteActive ? '<span class="pill live">vote running</span>' : x.saleClosed ? 'no vote' : 'sale open') + '</span></span></div>').join('') + '</div></section>'
+    PUT('gov2').h = g
+    PUT('gpHint').h = d ? (state.me && state.me.isGP ? '<span class="pill warn">you are the GP</span>' : 'GP is ' + link(d.gp)) : ''
   }
 
   // ---------- wallet ----------
@@ -563,7 +865,6 @@
     const r = (e && (e.reason || (e.revert && e.revert.args && e.revert.args[0]) || e.shortMessage || (e.info && e.info.error && e.info.error.message) || e.message)) || String(e)
     return String(r).replace(/^execution reverted:?\s*/i, '').slice(0, 220)
   }
-
   async function syncWallet() {
     const eth = window.ethereum
     state.signer = null; state.account = null; state.walletChainOk = false
@@ -578,6 +879,7 @@
         }
       } catch (e) { /* stay read-only */ }
     }
+    state.me = null
     renderWallet(); buildActions(true)
     refresh(true)
   }
@@ -591,32 +893,13 @@
     } catch (e) { log('Wallet: ' + reason(e), true) }
     syncWallet()
   }
-
   function renderWallet() {
-    const chip = $('walletChip'), m = state.me, d = state.detail
+    const chip = $('walletChip'), m = state.me
     const set = (role, text, disabled) => { chip.dataset.role = role; chip.disabled = !!disabled; chip.querySelector('span').textContent = text }
-    let hint = '', box
-    if (!window.ethereum) {
-      set('none', 'Read-only', true)
-      box = '<div style="grid-column:1/-1"><div class="k">Read-only</div><div class="s">This browser has no wallet. Open the page in a browser with MetaMask to send transactions. Reading works without one.</div></div>'
-    } else if (!state.account) {
-      set('connect', 'Connect wallet')
-      box = '<div style="grid-column:1/-1"><div class="k">Not connected</div><div class="s">Connect a wallet to send transactions. You need a little Sepolia test ETH for gas.</div></div>'
-    } else if (!state.walletChainOk) {
-      set('connect', 'Switch network')
-      box = '<div style="grid-column:1/-1"><div class="k">Wrong network</div><div class="s">Wallet ' + esc(short(state.account)) + ' is on another network. Use the button at the top to switch to ' + esc(CFG.network) + '.</div></div>'
-    } else {
-      const gp = m && m.isGP
-      set(gp ? 'gp' : 'investor', short(state.account) + (gp ? ' · GP' : ''))
-      hint = link(state.account)
-      box = m && d ? cell('mUSDC', amt(m.usdc), 'test money') + cell(esc(d.symbol), amt(m.token), 'fund tokens') +
-        (m.escrowed > 0n ? cell('Locked in vote', amt(m.escrowed), esc(d.symbol)) : '') +
-        cell('Role', gp ? 'GP' : 'Investor', gp ? 'you are the GP of this sub-fund' : 'token holder or visitor')
-        : '<div style="grid-column:1/-1"><div class="s">Loading balances…</div></div>'
-    }
-    if ($('walletBox').innerHTML !== box) $('walletBox').innerHTML = box
-    $('walletHint').innerHTML = hint
-    $('gpHint').innerHTML = d ? (m && m.isGP ? '<span class="pill warn">you are the GP</span>' : 'GP is ' + link(d.gp)) : ''
+    if (!window.ethereum) set('none', 'Read-only', true)
+    else if (!state.account) set('connect', 'Connect wallet')
+    else if (!state.walletChainOk) set('connect', 'Switch network')
+    else set(m && m.isGP ? 'gp' : 'investor', short(state.account) + (m && m.isGP ? ' · GP' : ''))
   }
 
   // ---------- actions ----------
@@ -629,68 +912,69 @@
   }
   const FEE = 9970n // the pool keeps 0.30% of every swap
   const ammOut = (amountIn, rIn, rOut) => (amountIn <= 0n || rIn === 0n || rOut === 0n ? 0n : (amountIn * FEE * rOut) / (rIn * 10000n + amountIn * FEE))
-  const vsNav = (price, nav) => { const b = Number(((price - nav) * 10000n) / nav); return gapText(b) }
+  const vsNav = (price, nav) => gapText(Number(((price - nav) * 10000n) / nav))
+  const U6 = 10n ** 6n
 
   const ACTIONS = [
-    { id: 'mint', tab: 'trade', title: 'Get test mUSDC', lead: 'Play money for this prototype. Anyone can mint it.', btn: 'Mint test mUSDC', ghost: true,
+    { id: 'faucet', title: 'Get test mUSDC', btn: 'Get 100,000 test mUSDC', fields: [],
+      why: () => '',
+      steps: async (c) => [['Getting 100,000 test mUSDC', c.usdc, 'faucet', []]] },
+    { id: 'mint', tab: 'pf', title: 'Get test mUSDC', lead: 'Play money for this prototype. Anyone can mint any amount.', btn: 'Mint test mUSDC', ghost: true,
       fields: [F.usdc('a')], chips: [{ l: '100k', v: '100000' }, { l: '1M', v: '1000000' }, { l: '2M', v: '2000000' }],
       why: () => '',
       steps: async (c, v) => [['Minting test mUSDC', c.usdc, 'mint', [c.account, v.a]]] },
-    { id: 'buy', tab: 'trade', title: 'Primary sale', lead: 'Buy new tokens from the fund at a fixed $1.00. This is the only issue: no capital calls later.', btn: 'Buy at $1.00',
+    { id: 'buy', title: 'Primary sale', btn: 'Buy at $1.00',
       fields: [F.tok('a')], chips: [{ l: '100k', v: '100000' }, { l: '500k', v: '500000' }, { l: '1M', v: '1000000' }],
-      show: (d) => !d.saleClosed,
       why: (d) => need(!d.saleClosed, 'The primary sale is closed.'),
-      pre: (d, m, v) => 'Cost: ' + amt(v.a) + ' mUSDC',
+      pre: (d, m, v) => 'Cost: ' + amt(v.a) + ' mUSDC' + (m ? ' · wallet holds ' + amt(m.usdc) : ''),
       steps: async (c, v) => [await approval(c, c.usdc, c.f.fund, v.a, 'mUSDC'), ['Buying in the primary sale', c.fund, 'buy', [v.a]]] },
-    { id: 'swapbuy', tab: 'trade', side: 'buy', title: 'Buy in the pool', lead: 'Swap mUSDC for fund tokens at the market price.', btn: 'Buy',
-      fields: [F.usdc('a')], chips: [{ l: '25%', pct: 25, of: 'usdc' }, { l: '50%', pct: 50, of: 'usdc' }, { l: 'Max', pct: 100, of: 'usdc' }],
-      show: (d) => d.saleClosed,
+    { id: 'swapbuy', title: 'Buy in the pool', btn: 'Buy', term: 'buy', fields: [F.usdc('a')],
       why: (d) => need(d.saleClosed, 'The market opens when the sale closes.'),
-      pre: (d, m, v) => {
+      quote: (d, m, v) => {
         const out = ammOut(v.a, d.reserveUSDC, d.reserveToken)
-        if (out === 0n || out >= d.reserveToken) return ''
-        const after = ((d.reserveUSDC + v.a) * 10n ** 6n) / (d.reserveToken - out)
-        return 'You receive about ' + amt(out) + ' ' + d.symbol + ' · price after ' + usd(after) + ' (' + vsNav(after, d.navPerToken) + ' vs NAV now)'
+        if (out === 0n || out >= d.reserveToken) return null
+        const after = ((d.reserveUSDC + v.a) * U6) / (d.reserveToken - out)
+        return [['You pay', amt(v.a) + ' mUSDC'], ['You receive about', amt(out) + ' ' + d.symbol], ['Average price', usd((v.a * U6) / out)], ['Pool price after', usd(after)],
+          ['Vs NAV after', vsNav(after, d.navPerToken)], ['Pool fee', '0.30%'], ['Minimum received', amt((out * 99n) / 100n) + ' ' + d.symbol]]
       },
       steps: async (c, v) => {
         const out = await c.pool.quoteUSDCForToken(v.a)
         return [await approval(c, c.usdc, c.f.pool, v.a, 'mUSDC'), ['Buying in the pool', c.pool, 'swapUSDCForToken', [v.a, (out * 99n) / 100n]]]
       } },
-    { id: 'sell', tab: 'trade', side: 'sell', title: 'Sell in the pool', lead: 'This is the exit: the fund never redeems. You sell to the market.', btn: 'Sell', sell: true,
-      fields: [F.tok('a')], chips: [{ l: '25%', pct: 25, of: 'token' }, { l: '50%', pct: 50, of: 'token' }, { l: 'Max', pct: 100, of: 'token' }],
-      show: (d) => d.saleClosed,
+    { id: 'sell', title: 'Sell in the pool', btn: 'Sell', term: 'sell', fields: [F.tok('a')],
       why: (d) => need(d.saleClosed, 'The market opens when the sale closes.'),
-      pre: (d, m, v) => {
+      quote: (d, m, v) => {
         const out = ammOut(v.a, d.reserveToken, d.reserveUSDC)
-        if (out === 0n) return ''
-        const after = ((d.reserveUSDC - out) * 10n ** 6n) / (d.reserveToken + v.a)
-        return 'You receive about ' + amt(out) + ' mUSDC · price after ' + usd(after) + ' (' + vsNav(after, d.navPerToken) + ' vs NAV now)'
+        if (out === 0n) return null
+        const after = ((d.reserveUSDC - out) * U6) / (d.reserveToken + v.a)
+        return [['You sell', amt(v.a) + ' ' + d.symbol], ['You receive about', amt(out) + ' mUSDC'], ['Average price', usd((out * U6) / v.a)], ['Pool price after', usd(after)],
+          ['Vs NAV after', vsNav(after, d.navPerToken)], ['Pool fee', '0.30%'], ['Minimum received', amt((out * 99n) / 100n) + ' mUSDC']]
       },
       steps: async (c, v) => {
         const out = await c.pool.quoteTokenForUSDC(v.a)
         return [await approval(c, c.token, c.f.pool, v.a, c.d.symbol), ['Selling in the pool', c.pool, 'swapTokenForUSDC', [v.a, (out * 99n) / 100n]]]
       } },
-    { id: 'subscribe', tab: 'trade', title: 'Follow-on', lead: 'New tokens from the fund at the higher of NAV and market price.', btn: 'Subscribe',
+    { id: 'subscribe', tab: 'pf', title: 'Follow-on', lead: 'New tokens from the selected fund at the higher of NAV and market price.', btn: 'Subscribe',
       fields: [F.tok('a')],
       show: (d) => d.followOnRemaining > 0n,
       why: (d) => need(d.followOnRemaining > 0n, 'No follow-on is open.'),
-      pre: (d, m, v) => 'Cost about ' + amt((v.a * d.issuePrice) / 10n ** 6n) + ' mUSDC at ' + usd(d.issuePrice),
+      pre: (d, m, v) => 'Cost about ' + amt((v.a * d.issuePrice) / U6) + ' mUSDC at ' + usd(d.issuePrice),
       steps: async (c, v) => {
         const maxPrice = (c.d.issuePrice * 102n) / 100n
-        return [await approval(c, c.usdc, c.f.fund, (v.a * maxPrice) / 10n ** 6n + 1n, 'mUSDC'), ['Subscribing to the follow-on', c.fund, 'subscribe', [v.a, maxPrice]]]
+        return [await approval(c, c.usdc, c.f.fund, (v.a * maxPrice) / U6 + 1n, 'mUSDC'), ['Subscribing to the follow-on', c.fund, 'subscribe', [v.a, maxPrice]]]
       } },
-    { id: 'close', tab: 'rules', inline: true, title: 'Close the sale and open the market', btn: 'Close sale, open market', fields: [],
+    { id: 'close', inline: true, title: 'Close the sale and open the market', btn: 'Close sale, open market', fields: [],
       show: (d) => !d.saleClosed,
-      why: (d, m) => d.saleClosed ? 'The sale is already closed.' : d.sold < 19n * 10n ** 6n ? 'Nothing has been sold yet.' : (m && m.isGP) || d.sold === SALE_CAP ? '' : 'Only the GP can close before sell-out.',
+      why: (d, m) => d.saleClosed ? 'The sale is already closed.' : d.sold < 19n * U6 ? 'Nothing has been sold yet.' : (m && m.isGP) || d.sold === SALE_CAP ? '' : 'Only the GP can close before sell-out.',
       steps: async (c) => [['Closing the sale', c.fund, 'closeSale', []]] },
-    { id: 'buyback', tab: 'rules', inline: true, title: 'Trigger the buyback-and-burn', btn: 'Trigger buyback', optional: true,
+    { id: 'buyback', inline: true, title: 'Trigger the buyback-and-burn', btn: 'Trigger buyback', optional: true,
       fields: [F.usdc('a', 'empty = maximum')],
       show: (d) => d.saleClosed,
       why: (d) => !d.saleClosed ? 'Opens with the market.' : d.marketPrice >= d.buybackTriggerPrice ? 'The market is not more than 10% below NAV.' :
         Number(d.lastBuyback) + Math.floor(state.year / 52) > now() ? 'Cooldown: ' + dur(Number(d.lastBuyback) + Math.floor(state.year / 52) - now()) + '.' :
           d.maxBuyback === 0n ? 'The vault holds no cash.' : '',
       steps: async (c, v) => [['Triggering the buyback', c.fund, 'buyback', [v.a === null ? c.d.maxBuyback : v.a]]] },
-    { id: 'fee', tab: 'rules', inline: true, title: 'Mint the yearly management fee', btn: 'Mint fee tranche', fields: [],
+    { id: 'fee', inline: true, title: 'Mint the yearly management fee', btn: 'Mint fee tranche', fields: [],
       show: (d) => d.saleClosed,
       why: (d) => !d.saleClosed ? 'Starts when the sale closes.' : d.feeTranchesMinted >= 10n ? 'Lifetime cap of 10 tranches reached.' :
         Number(d.lastFeeMint) + state.year > now() ? 'Not due yet: ' + dur(Number(d.lastFeeMint) + state.year - now()) + '.' : '',
@@ -703,7 +987,7 @@
     { id: 'mark', tab: 'gp', gp: true, title: 'Revalue the portfolio', lead: 'State what the off-chain investments are worth now. This is the oracle of the model.', btn: 'Report new value',
       fields: [F.usdc('val'), F.text('memo', 'Memo, e.g. Year-end valuation')],
       why: () => '',
-      pre: (d, m, v) => d.outstandingSupply === 0n ? '' : 'NAV per token after: about ' + usd(((d.vaultCash + d.polCash + v.val) * 10n ** 6n) / d.outstandingSupply) + ' (now ' + usd(d.navPerToken) + ')',
+      pre: (d, m, v) => d.outstandingSupply === 0n ? '' : 'NAV per token after: about ' + usd(((d.vaultCash + d.polCash + v.val) * U6) / d.outstandingSupply) + ' (now ' + usd(d.navPerToken) + ')',
       steps: async (c, v) => [['Revaluing the portfolio', c.fund, 'markInvestments', [v.val, v.memo]]] },
     { id: 'followon', tab: 'gp', gp: true, title: 'Open a follow-on', lead: 'Offer additional tokens. The price is set by the code, not by the GP.', btn: 'Open follow-on', fields: [F.tok('a')],
       why: (d) => need(d.saleClosed, 'Possible after the sale closes.'),
@@ -716,82 +1000,107 @@
     { id: 'claim', tab: 'gp', gp: true, title: 'Claim vested fee tokens', lead: 'Fee tokens unlock one year after they were minted.', btn: 'Claim', ghost: true, fields: [],
       why: (d) => need(d.claimable > 0n, 'Nothing has vested yet.'),
       steps: async (c) => [['Claiming vested fee tokens', c.vesting, 'claim', []]] },
-    { id: 'propose', tab: 'govern', title: 'Propose a new GP', lead: 'Any token holder can start a vote.', btn: 'Start the vote', fields: [F.address('to', 'Address of the new GP')],
+    { id: 'propose', tab: 'govern', title: 'Propose a new GP', lead: 'Any holder of the selected fund can start a vote.', btn: 'Start the vote', fields: [F.address('to', 'Address of the new GP')],
+      show: (d) => !d.voteActive,
       why: (d, m) => !d.saleClosed ? 'Possible after the sale closes.' : d.voteActive ? 'A vote is already running.' : m && m.token === 0n ? 'Token holders only.' : '',
       steps: async (c, v) => [['Proposing a new GP', c.fund, 'proposeRemoveGP', [v.to]]] },
     { id: 'vote', tab: 'govern', title: 'Vote yes', lead: 'Your tokens are locked in the fund until the vote ends, so no token votes twice.', btn: 'Lock tokens and vote yes',
       fields: [F.tok('a')], chips: [{ l: '50%', pct: 50, of: 'token' }, { l: 'Max', pct: 100, of: 'token' }],
+      show: (d) => d.voteActive,
       why: (d, m) => !d.voteActive ? 'No vote is running.' : m && m.isGP ? 'The GP cannot vote on his own removal.' : '',
       steps: async (c, v) => [await approval(c, c.token, c.f.fund, v.a, c.d.symbol), ['Voting yes', c.fund, 'vote', [v.a]]] },
     { id: 'execute', tab: 'govern', title: 'Execute the removal', lead: 'Anyone can execute once more than 50% of eligible supply has voted yes.', btn: 'Replace the GP', fields: [],
+      show: (d) => d.voteActive,
       why: (d) => !d.voteActive ? 'No vote is running.' : d.yesVotes * 10000n > d.eligibleSupply * 5000n ? '' : 'Threshold of more than 50% not reached.',
       steps: async (c) => [['Executing the GP removal', c.fund, 'executeRemoveGP', []]] },
     { id: 'withdraw', tab: 'govern', title: 'Withdraw locked votes', lead: 'Get your tokens back after the vote.', btn: 'Withdraw', ghost: true, fields: [],
+      show: (d, m) => !!m && m.escrowed > 0n,
       why: (d, m) => m && m.escrowed === 0n ? 'You have no tokens locked.' : d.voteActive ? 'The vote is still running.' : '',
       steps: async (c) => [['Withdrawing locked votes', c.fund, 'withdrawVotes', [c.d.proposalId]]] }
   ]
+  const ACT = Object.fromEntries(ACTIONS.map((a) => [a.id, a]))
 
   async function approval(c, erc20, spender, amount, label) {
-    const cur = await erc20.allowance(c.account, spender)
-    if (cur >= amount) return null
+    const cur0 = await erc20.allowance(c.account, spender)
+    if (cur0 >= amount) return null
     return ['One-time approval for ' + label, erc20, 'approve', [spender, E.MaxUint256]]
   }
 
-  function actHtml(a) {
-    const fields = a.fields.map((f) => '<label class="field' + (f.type === 'amount' ? '' : ' txt') + '"><input data-k="' + f.k + '" placeholder="' + esc(f.ph) + '"' +
+  function fieldsHtml(a) {
+    return a.fields.map((f) => '<label class="field' + (f.type === 'amount' ? '' : ' txt') + '"><input data-k="' + f.k + '" placeholder="' + esc(f.ph) + '"' +
       (f.type === 'amount' ? ' inputmode="decimal"' : '') + ' autocomplete="off" spellcheck="false">' +
       (f.unit ? '<span class="unit"' + (f.unit === 'token' ? ' data-unit="token">token' : '>' + f.unit) + '</span>' : '') + '</label>').join('')
+  }
+  function actHtml(a, o) {
+    o = o || {}
     const chips = a.chips ? '<div class="chips">' + a.chips.map((c, i) => '<button type="button" class="chip" data-chip="' + i + '">' + c.l + '</button>').join('') + '</div>' : ''
-    const cls = 'btn go' + (a.sell ? ' sellb' : '') + (a.ghost ? ' ghost' : '')
-    if (a.inline) return '<div class="act" data-a="' + a.id + '">' + fields + '<button class="' + cls + ' sm">' + a.btn + '</button><p class="note why"></p></div>'
-    return '<div class="card act" data-a="' + a.id + '"><h3>' + a.title + '</h3>' + (a.lead ? '<p class="lead">' + a.lead + '</p>' : '') + fields + chips +
+    const cls = 'btn go' + (a.ghost || o.ghost ? ' ghost' : '')
+    if (a.inline || o.inline) return '<div class="act" data-a="' + a.id + '">' + fieldsHtml(a) + '<button class="' + cls + ' sm">' + a.btn + '</button><p class="note why"></p></div>'
+    return '<div class="card act" data-a="' + a.id + '"><h3>' + a.title + '</h3>' + (a.lead ? '<p class="lead">' + a.lead + '</p>' : '') + fieldsHtml(a) + chips +
       '<p class="note pre"></p><p class="note why"></p><button class="' + cls + '">' + a.btn + '</button></div>'
   }
+  const ticks = '<input class="orange" type="range" min="0" max="100" step="1" value="0" aria-label="Share of available balance"><div class="oticks">' +
+    [0, 25, 50, 75, 100].map((v) => '<button type="button" data-pct="' + v + '">' + v + ' %</button>').join('') + '</div>'
+  const orderForm = (id, label, unit) => '<div class="oform" data-a="' + id + '"><label class="ofield"><span>' + label + '</span><input data-k="a" inputmode="decimal" autocomplete="off" placeholder="0.00"><em' +
+    (unit ? '>' + unit : ' data-unit="token">token') + '</em></label>' + ticks + '<div class="oquote"></div><p class="qwarn why"></p><button class="ogo go ' + (id === 'sell' ? 's' : 'b') + '">' + (id === 'sell' ? 'Sell' : 'Buy') + ' <span data-unit="token">token</span></button></div>'
 
   function buildActions(force) {
     const key = state.selected + '|' + (state.signer ? state.account : 'none')
     if (!force && key === state.actionsKey) return updateActions()
     state.actionsKey = key
-    for (const tab of ['trade', 'gp', 'govern']) {
-      let html = ''
-      for (const a of ACTIONS.filter((x) => x.tab === tab)) {
-        if (a.id === 'swapbuy') html += '<div class="seg" id="sideSeg"><button type="button" data-side="buy">Buy</button><button type="button" data-side="sell">Sell</button></div>'
-        html += actHtml(a)
-      }
-      $('act-' + tab).innerHTML = html
-    }
+    $('torder').innerHTML = '<div class="oside" role="group" aria-label="Side"><button class="b" data-side="buy">Buy</button><button class="s" data-side="sell">Sell</button></div>' +
+      '<div class="otype" role="group" aria-label="Order type"><button aria-pressed="true">Market</button></div>' +
+      '<div class="oav"><span>Available</span><span id="oav">–</span></div>' + orderForm('swapbuy', 'Spend', 'mUSDC') + orderForm('sell', 'Size', '') +
+      '<div class="oacct"><div class="oh">Account</div><div id="oacct"></div><div data-a="faucet"><button class="oclaim go">Get 100,000 test mUSDC</button><p class="qwarn why"></p></div></div>'
+    $('ipo').innerHTML = '<div class="card hi"><div id="ipoStatus"></div>' + '<div class="act" data-a="buy" style="display:flex;flex-direction:column;gap:12px">' + fieldsHtml(ACT.buy) +
+      '<div class="chips">' + ACT.buy.chips.map((c, i) => '<button type="button" class="chip" data-chip="' + i + '">' + c.l + '</button>').join('') + '</div><p class="note pre"></p><p class="note why"></p><button class="btn go">Buy at $1.00</button></div></div>' +
+      '<div class="btns">' + '<div data-a="faucet" style="flex:1 1 220px"><button class="btn ghost go">Get 100,000 test mUSDC</button><p class="note why"></p></div>' +
+      '<div data-a="close" style="flex:1 1 220px"><button class="btn ghost go">Close the sale, open the market</button><p class="note why"></p></div></div>'
+    for (const tab of ['gp', 'govern', 'pf']) $('act-' + tab).innerHTML = ACTIONS.filter((x) => x.tab === tab).map((a) => actHtml(a)).join('')
     $('rules').innerHTML = RULES.map((r) => '<div class="light" data-rule="' + r.k + '"><span class="lamp"></span><div class="grow"><div class="t">' + r.t + '</div><div class="d">' + r.p +
-      '</div><div class="st"></div>' + (r.act ? actHtml(ACTIONS.find((a) => a.id === r.act)) : '') + '</div></div>').join('')
+      '</div><div class="st"></div>' + (r.act ? actHtml(ACT[r.act], { inline: true }) : '') + '</div></div>').join('')
     updateActions()
   }
 
-  const rowOf = (id) => document.querySelector('[data-a="' + id + '"]')
+  function available() { const m = state.me; return !m ? 0n : state.side === 'buy' ? m.usdc : m.token }
   function updateActions() {
     const d = state.detail, m = state.me
-    const seg = $('sideSeg')
-    if (seg) {
-      seg.hidden = !d || !d.saleClosed
-      seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.side === state.side)))
-    }
-    for (const a of ACTIONS) {
-      const row = rowOf(a.id)
-      if (!row) continue
+    document.querySelectorAll('#torder .oside button').forEach((b) => b.classList.toggle('on', b.dataset.side === state.side))
+    for (const row of document.querySelectorAll('[data-a]')) {
+      const a = ACT[row.dataset.a]
+      if (!a) continue
       let why = '', soft = false
       if (!d) { why = 'Loading…'; soft = true }
       else if (!state.signer) { why = a.why(d, null); if (!why) { why = 'Connect a wallet on ' + CFG.network + ' to send this.'; soft = true } }
       else why = (a.gp && m && !m.isGP ? 'Only the GP of this sub-fund can do this.' : '') || a.why(d, m)
-      row.hidden = !!d && ((a.show && !a.show(d)) || (a.side && a.side !== state.side))
+      if (a.term) row.hidden = a.term !== state.side
+      else if (a.show && (row.classList.contains('card') || row.closest('.light'))) row.hidden = !!d && !a.show(d, m)
       const note = row.querySelector('.why')
-      note.textContent = why
-      note.classList.toggle('soft', soft)
+      if (note) { if (note.textContent !== why) note.textContent = why; note.classList.toggle('soft', soft) }
       row.querySelector('.go').disabled = !!why || state.busy || !state.signer
-      row.querySelectorAll('[data-unit="token"]').forEach((u) => { if (d) u.textContent = d.symbol })
+      row.querySelectorAll('[data-unit="token"]').forEach((u) => { if (d && u.textContent !== d.symbol) u.textContent = d.symbol })
+      let v = null
+      if (d && (a.pre || a.quote)) { try { v = readFields(a, row) } catch (e) { v = null } }
       const pre = row.querySelector('.pre')
-      if (pre) {
-        let text = ''
-        if (d && a.pre) { try { const v = readFields(a, row); text = a.pre(d, m, v) || '' } catch (e) { text = '' } }
-        pre.textContent = text
+      if (pre) { const text = v && a.pre ? a.pre(d, m, v) || '' : ''; if (pre.textContent !== text) pre.textContent = text }
+      const q = row.querySelector('.oquote')
+      if (q) {
+        const rows = v && a.quote ? a.quote(d, m, v) : null
+        const html = rows ? rows.map((r) => '<div class="qrow"><span>' + r[0] + '</span><span>' + esc(r[1]) + '</span></div>').join('') : '<div class="qrow"><span>Enter a size to see the quote</span><span></span></div>'
+        if (q.__h !== html) { q.innerHTML = html; q.__h = html }
       }
+    }
+    if (d) {
+      const av = $('oav'); if (av) av.textContent = m ? amt(available()) + ' ' + (state.side === 'buy' ? 'mUSDC' : d.symbol) : '–'
+      const ac = $('oacct')
+      if (ac) {
+        const html = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div><div class="qrow"><span>Value at pool price</span><span>$' +
+          cmp(num(m.token) * num(d.marketPrice)) + '</span></div><div class="qrow"><span>Value at NAV</span><span>$' + cmp(num(m.token) * num(d.navPerToken)) + '</span></div>'
+          : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to trade' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
+        if (ac.__h !== html) { ac.innerHTML = html; ac.__h = html }
+      }
+      $('term').hidden = !d.saleClosed
+      $('ipo').hidden = d.saleClosed
     }
   }
 
@@ -831,7 +1140,7 @@
     let v
     try { v = readFields(a, row) } catch (e) { log(a.title + ': ' + e.message, true); return }
     state.busy = true; updateActions()
-    const f = state.funds[state.selected], s = state.signer
+    const f = cur(), s = state.signer
     const c = {
       account: state.account, f, d: state.detail,
       fund: new E.Contract(f.fund, ABI.fund, s), token: new E.Contract(f.token, ABI.erc20, s),
@@ -850,7 +1159,7 @@
         const rc = await tx.wait()
         log('  confirmed in block ' + rc.blockNumber + '.')
       }
-      row.querySelectorAll('input').forEach((inp) => { inp.value = '' })
+      row.querySelectorAll('input').forEach((inp) => { inp.value = inp.type === 'range' ? 0 : '' })
     } catch (e) {
       log(a.title + ': ' + (e.message && e.message.startsWith('Blocked') ? e.message : reason(e)), true)
     } finally {
@@ -861,35 +1170,41 @@
   }
 
   function render() {
-    renderFunds(); renderHero(); renderKpis(); renderChart(); renderWallet(); buildActions(false); renderRules(); renderFeed(); renderFooter()
+    renderTop(); renderWallet(); buildActions(false)
+    renderHead(); renderChart(); renderBook(); renderBottom(); if (!state.detail.saleClosed) renderIpo()
+    renderFunds(); renderKpis(); renderRules(); renderReports(); renderPortfolio(); renderGovern()
+    updateActions()
   }
 
   // ---------- wiring ----------
-  $('funds').addEventListener('click', (e) => {
-    const card = e.target.closest('[data-i]')
-    if (!card) return
-    const i = Number(card.dataset.i)
-    if (i === state.selected) return
+  function selectFund(i) {
+    state.fsel = false
+    if (i === state.selected || !state.funds[i]) { renderTop(); return }
     state.selected = i; state.detail = null; state.me = null
-    $('kpis').innerHTML = ''; $('feed').innerHTML = ''; $('chart').innerHTML = ''; $('hero').innerHTML = ''; $('strip').innerHTML = ''
-    renderFunds(); buildActions(true)
+    renderTop(); renderFunds(); buildActions(true)
     refresh(true)
-  })
-  $('tabs').addEventListener('click', (e) => {
-    const b = e.target.closest('[data-tab]')
-    if (!b || b.dataset.tab === state.tab) return
-    state.tab = b.dataset.tab
-    renderTabs()
-    window.scrollTo(0, 0)
-  })
-  $('view').addEventListener('click', (e) => {
-    const side = e.target.closest('[data-side]')
-    if (side) { state.side = side.dataset.side; updateActions(); return }
-    const row = e.target.closest('[data-a]')
+  }
+  function setTab(t) { state.tab = t; state.fsel = false; renderTop(); window.scrollTo(0, 0) }
+  document.addEventListener('click', (e) => {
+    const t = e.target
+    const tabB = t.closest('[data-tab]'); if (tabB) { setTab(tabB.dataset.tab); return }
+    if (t.closest('#fbtn') || t.closest('[data-open-funds]')) { state.fsel = !state.fsel; renderTop(); if (state.fsel) { const q = $('f-q'); if (q && window.innerWidth >= 700) q.focus() } return }
+    const ff = t.closest('[data-ff]'); if (ff) { state.ff = ff.dataset.ff; $('fpanel').innerHTML = ''; renderTop(); return }
+    const fundEl = t.closest('[data-fund]'); if (fundEl) { const i = Number(fundEl.dataset.fund); const go = fundEl.dataset.go; selectFund(i); if (go && state.tab !== go) setTab(go); return }
+    if (state.fsel && !t.closest('.fpanel')) { state.fsel = false; renderTop() }
+    const fundRow = t.closest('#funds [data-i]'); if (fundRow) { selectFund(Number(fundRow.dataset.i)); return }
+    const sub = t.closest('[data-sub-tab]'); if (sub) { state.sub = sub.dataset.subTab; renderFunds(); return }
+    const range = t.closest('[data-range]'); if (range) { state.range = range.dataset.range; if (state.detail) renderChart(); return }
+    const pane = t.closest('[data-pane]'); if (pane) { state.pane = pane.dataset.pane; if (state.detail) renderBook(); return }
+    const tt = t.closest('[data-ttab]'); if (tt) { state.ttab = tt.dataset.ttab; if (state.detail) renderBottom(); return }
+    const side = t.closest('[data-side]'); if (side) { state.side = side.dataset.side; updateActions(); return }
+    const row = t.closest('[data-a]')
     if (!row) return
-    const a = ACTIONS.find((x) => x.id === row.dataset.a)
+    const a = ACT[row.dataset.a]
     if (!a) return
-    const chip = e.target.closest('[data-chip]')
+    const pctB = t.closest('[data-pct]')
+    if (pctB) { setPct(row, Number(pctB.dataset.pct)); return }
+    const chip = t.closest('[data-chip]')
     if (chip) {
       const c = a.chips[Number(chip.dataset.chip)], m = state.me
       const input = row.querySelector('[data-k="a"]')
@@ -898,19 +1213,31 @@
       updateActions()
       return
     }
-    if (e.target.closest('.go')) runAction(a, row)
+    if (t.closest('.go')) runAction(a, row)
   })
-  $('view').addEventListener('input', () => updateActions())
+  function setPct(row, p) {
+    const av = available()
+    row.querySelector('[data-k="a"]').value = av > 0n && p > 0 ? E.formatUnits((av * BigInt(p)) / 100n, D) : ''
+    const r = row.querySelector('.orange'); if (r) r.value = p
+    updateActions()
+  }
+  document.addEventListener('input', (e) => {
+    if (e.target.id === 'f-q') { state.fq = e.target.value; PUT('f-list').h = fundList(); return }
+    if (e.target.classList.contains('orange')) { setPct(e.target.closest('[data-a]'), Number(e.target.value)); return }
+    if (e.target.closest('[data-a]')) updateActions()
+  })
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.fsel) { state.fsel = false; renderTop() } })
+  window.addEventListener('resize', () => { if (state.fsel) placePanel() })
   $('walletChip').onclick = () => { if (!state.account) connect(); else if (!state.walletChainOk) switchChain() }
-  $('chart').addEventListener('mousemove', chartHover)
-  $('chart').addEventListener('mouseleave', chartLeave)
+  $('chartBox').addEventListener('mousemove', chartHover)
+  $('chartBox').addEventListener('mouseleave', chartHover)
   if (window.ethereum && window.ethereum.on) {
     window.ethereum.on('accountsChanged', syncWallet)
     window.ethereum.on('chainChanged', syncWallet)
   }
-  document.querySelector('.net').textContent = CFG.short || CFG.network
-  renderTabs()
-  setInterval(() => { if (state.detail) { renderRules(); updateActions(); setNet(state.netOk) } }, 1000)
+  $('netChip').textContent = CFG.short || CFG.network
+  renderTop()
+  setInterval(() => { if (state.detail) { renderRules(); renderGovern(); updateActions(); setNet(state.netOk) } }, 1000)
   setInterval(() => refresh(false), CFG.pollMs)
   syncWallet()
 })()
