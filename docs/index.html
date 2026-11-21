@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perma Capital - live fund dashboard (Sepolia testnet)</title>
+<meta name="description" content="University prototype of a tokenized permanent-capital fund. Live numbers from the Sepolia testnet. Play money only.">
+<style>
+  :root {
+    --navy: #0B2545; --navy-2: #13315C; --gold: #C9A227; --gold-soft: #F3E7BF;
+    --ivory: #FAF6EC; --paper: #FFFDF7; --ink: #1B2433; --muted: #5E6B7D; --line: #E4DCC8;
+    --neg: #A63A2B; --neg-soft: #F6E1DC; --pos: #2E6E4A; --pos-soft: #DDEEE3;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--ivory); color: var(--ink);
+    font: 15px/1.5 "DejaVu Sans", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif; }
+  h1, h2, h3 { font-family: "DejaVu Serif", Georgia, "Times New Roman", serif; color: var(--navy); margin: 0; }
+  a { color: var(--navy-2); }
+  .mono { font-family: "DejaVu Sans Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 20px 48px; }
+
+  header.top { background: var(--navy); color: #fff; border-bottom: 4px solid var(--gold); }
+  header.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 16px 20px; }
+  header.top h1 { color: #fff; font-size: 26px; letter-spacing: 0.2px; }
+  header.top .sub { color: #C9D3E3; font-size: 13px; }
+  .grow { flex: 1 1 auto; }
+  .net { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #C9D3E3; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #8A94A6; flex: none; }
+  .dot.ok { background: #5FD08A; } .dot.bad { background: #E0705F; }
+  button { font: inherit; cursor: pointer; border-radius: 6px; border: 1px solid var(--navy); background: var(--navy);
+    color: #fff; padding: 8px 14px; }
+  button:hover:not(:disabled) { background: var(--navy-2); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.gold { background: var(--gold); border-color: var(--gold); color: var(--navy); font-weight: 600; }
+  button.gold:hover:not(:disabled) { background: #D8B23A; }
+  button.ghost { background: transparent; color: var(--navy); }
+  button.ghost:hover:not(:disabled) { background: var(--gold-soft); }
+
+  .notice { background: var(--gold-soft); border: 1px solid var(--gold); border-radius: 8px; padding: 10px 14px;
+    margin: 18px 0 0; font-size: 13.5px; }
+  .error { background: var(--neg-soft); border: 1px solid var(--neg); color: #5C1E15; border-radius: 8px;
+    padding: 10px 14px; margin: 14px 0 0; font-size: 13.5px; }
+  [hidden] { display: none !important; }
+
+  section { margin-top: 26px; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .sec-head h2 { font-size: 20px; }
+  .sec-head .hint { color: var(--muted); font-size: 13px; }
+
+  .funds { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .fund-card { text-align: left; background: var(--paper); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; border-top: 4px solid var(--line); }
+  .fund-card:hover:not(:disabled) { background: #fff; }
+  .fund-card.sel { border-top-color: var(--gold); box-shadow: 0 2px 10px rgba(11, 37, 69, 0.10); }
+  .fund-card .nm { font-family: "DejaVu Serif", Georgia, serif; font-size: 18px; color: var(--navy); }
+  .fund-card .row { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 14px; }
+  .fund-card .row span:first-child { color: var(--muted); }
+  .badge { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 12.5px; font-weight: 600;
+    background: #ECE6D6; color: var(--ink); white-space: nowrap; }
+  .badge.neg { background: var(--neg-soft); color: var(--neg); }
+  .badge.pos { background: var(--pos-soft); color: var(--pos); }
+  .badge.gold { background: var(--gold-soft); color: #6B5410; }
+
+  .kpis { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 12px; }
+  .kpi { grid-column: span 3; } .kpi.hero { grid-column: span 4; }
+  @media (max-width: 960px) { .kpi, .kpi.hero { grid-column: span 6; } }
+  @media (max-width: 520px) { .kpi, .kpi.hero { grid-column: span 12; } }
+  .kpi { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .kpi .lbl { color: var(--muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .kpi .val { font-size: 27px; font-weight: 600; color: var(--navy); line-height: 1.25; margin-top: 2px; }
+  .kpi .note { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .kpi.hero { border-left: 4px solid var(--gold); }
+  .val.neg { color: var(--neg); } .val.pos { color: var(--pos); }
+
+  .cols { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+  @media (max-width: 960px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .panel h3 { font-size: 16px; margin-bottom: 8px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; }
+  #chart { width: 100%; height: auto; display: block; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { text-align: right; white-space: nowrap; }
+  .bar { height: 8px; background: #ECE6D6; border-radius: 999px; overflow: hidden; margin-top: 4px; }
+  .bar > i { display: block; height: 100%; background: var(--gold); }
+
+  .feed { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow: auto; }
+  .feed li { padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+  .feed li:last-child { border-bottom: 0; }
+  .feed .when { color: var(--muted); font-size: 12px; }
+
+  .wallet { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 13.5px; margin-bottom: 10px; }
+  .group { margin-top: 14px; }
+  .group > summary { cursor: pointer; margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px; }
+  .act { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; align-items: end;
+    padding: 9px 0; border-top: 1px solid var(--line); }
+  .act .ttl { font-weight: 600; color: var(--navy); }
+  .act .why { color: var(--muted); font-size: 12.5px; }
+  .act .fields { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+  .act input { font: inherit; padding: 6px 8px; border: 1px solid #CFC6AE; border-radius: 6px; background: #fff;
+    min-width: 0; width: 200px; max-width: 100%; }
+  .act input.wide { width: 300px; }
+  #txlog { margin-top: 12px; font-size: 13px; background: #F4EFE0; border-radius: 8px; padding: 10px 12px;
+    white-space: pre-wrap; max-height: 220px; overflow: auto; }
+  footer { margin-top: 34px; color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 14px; }
+  footer .addr { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 4px 20px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div>
+      <h1>Perma Capital</h1>
+      <div class="sub">Tokenized permanent-capital fund &middot; live on-chain dashboard</div>
+    </div>
+    <div class="grow"></div>
+    <div class="net"><span id="netDot" class="dot"></span><span id="netText">connecting&hellip;</span></div>
+    <button id="btnConnect" class="gold">Connect wallet</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="notice">
+    <strong>University prototype on the Sepolia testnet.</strong> mUSDC is play money and the tokens have no value.
+    Nothing here is an offer to invest. The contracts are not audited.
+  </div>
+  <div id="fatal" class="error" hidden></div>
+
+  <section>
+    <div class="sec-head"><h2>Umbrella</h2><span class="hint">Separate sub-funds under one roof. Select one.</span></div>
+    <div id="funds" class="funds"></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 id="fundTitle">Sub-fund</h2><span id="fundSub" class="hint"></span></div>
+    <div id="kpis" class="kpis"></div>
+  </section>
+
+  <section class="cols">
+    <div>
+      <div class="panel">
+        <h3>NAV per token and market price</h3>
+        <div class="legend">
+          <span><i style="background:#0B2545"></i>NAV per token</span>
+          <span><i style="background:#C9A227"></i>Market price (pool)</span>
+          <span id="chartRead"></span>
+        </div>
+        <svg id="chart" viewBox="0 0 800 300" role="img" aria-label="NAV per token and market price over time"></svg>
+        <div class="foot">History from on-chain events; at pool trades the NAV line carries the last reported NAV forward.
+          Live values are added while this page is open.</div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <h3>What the code enforces, right now</h3>
+        <table id="rules"></table>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <h3>Actions</h3>
+        <div id="walletBox" class="wallet"></div>
+        <div id="actions"></div>
+        <div id="txlog" hidden></div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <h3>On-chain activity</h3>
+        <ul id="feed" class="feed"></ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div>All numbers are read from the contracts on <span id="footNet"></span>. Amounts use 6 decimals, like USDC.
+      The value of off-chain investments is reported by the GP and is the one input that is not verified on-chain.</div>
+    <div id="addrs" class="addr"></div>
+  </footer>
+</div>
+
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
