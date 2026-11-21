@@ -6,7 +6,7 @@
 //      Arbitrum Sepolia for gas: a faucet, or bridge SepoliaETH at bridge.arbitrum.io.
 //   3. Deploy & Run tab: choose the MetaMask (browser extension) environment.
 //   4. Right-click this file -> Run. MetaMask asks for one confirmation per
-//      transaction: 4 deployments + 1 per sub-fund (7 in total).
+//      transaction: 5 deployments + 1 per sub-fund (8 in total).
 //
 // The script refuses to run on any chain other than Arbitrum Sepolia.
 // Addresses are printed and saved to scripts/perma/arbitrum-sepolia-deployment.json.
@@ -34,7 +34,8 @@ const EXISTING = {
   usdc: '',
   components: '',
   fundDeployer: '',
-  umbrella: ''
+  umbrella: '',
+  tradingAccounts: ''
 }
 
 const OUT_FILE = 'scripts/perma/arbitrum-sepolia-deployment.json'
@@ -105,6 +106,7 @@ const artifact = async (name: string) => {
       EXISTING.umbrella
     )
 
+    const tradingAccounts = await deployOrAttach('TradingAccountFactory', [addrOf(umbrella)], EXISTING.tradingAccounts)
     const startBlock = Number(await provider.getBlockNumber())
     const launched = Number(await umbrella.subFundCount())
     for (let i = launched; i < SUB_FUNDS.length; i++) {
@@ -124,6 +126,7 @@ const artifact = async (name: string) => {
       components: addrOf(components),
       fundDeployer: addrOf(fundDeployer),
       umbrella: addrOf(umbrella),
+      tradingAccounts: addrOf(tradingAccounts),
       subFunds: []
     }
     const count = Number(await umbrella.subFundCount())
@@ -145,7 +148,7 @@ const artifact = async (name: string) => {
       console.log('  could not save ' + OUT_FILE + ' - copy the addresses above')
     }
     console.log('=== Deployment finished. UmbrellaFactory: ' + addrOf(umbrella) + ' ===')
-    console.log('docs/config.js, network "arbitrum": umbrella ' + addrOf(umbrella) + ', usdc ' + addrOf(usdc) + (launched === 0 ? ', deployBlock ' + startBlock : ''))
+    console.log('docs/config.js, network "arbitrum": umbrella ' + addrOf(umbrella) + ', usdc ' + addrOf(usdc) + ', tradingAccounts ' + addrOf(tradingAccounts) + (launched === 0 ? ', deployBlock ' + startBlock : ''))
   } catch (e: any) {
     console.log('DEPLOYMENT FAILED: ' + (e && e.message ? e.message : e))
   }

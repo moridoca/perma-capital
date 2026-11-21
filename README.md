@@ -49,13 +49,22 @@ selector, five sections, and a tab bar on phones.
 | Portfolio | The connected wallet: account value, holdings across all funds at market and at NAV, test mUSDC |
 | Govern | Votes to replace a manager, the valuations the GP has reported, the manager of each fund |
 
-**Fast trading.** Under Portfolio the page can create a trading key in the browser, like
-an agent key on Hyperliquid: top it up once with a little gas from MetaMask (one
-confirmation), mint test mUSDC to it, and from then on orders are signed by the key
-without a wallet pop-up. "Send everything back" returns mUSDC, fund tokens and the
-remaining gas to the MetaMask address. The key sits in the browser's storage, so this is
-for test networks only; GP actions still go through MetaMask. A production version would
-use a smart account with a session key limited to trading, an amount cap and an expiry.
+**Fast trading.** Orders without a wallet pop-up, like an agent key on Hyperliquid, built so
+that it would also hold for real money (`contracts/perma/TradingAccount.sol`):
+
+- Your funds sit in a **trading account**, a contract that only your wallet owns. One
+  MetaMask confirmation creates it and starts a session.
+- A **session key** created in the browser signs orders for that account. It can only buy
+  and sell in this umbrella's pools and primary sales, only until its expiry (at most 30
+  days), only up to a volume cap, and only at prices the owner allows around NAV (default:
+  buy at most 10% above NAV, sell at least 20% below NAV, checked after each trade).
+- It can send funds back to the owner and nowhere else. It never holds funds itself,
+  only a little gas, which comes along in the same confirmation.
+- The owner can end a session at any time; each new session gets a new key.
+- A stolen key can therefore cause at most bad trades within these limits until the
+  session ends. It cannot withdraw.
+
+GP actions and governance still go through MetaMask. The contract is a prototype and not audited.
 
 What the page does not pretend:
 

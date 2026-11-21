@@ -98,6 +98,19 @@
       'function transfer(address to, uint256 value) returns (bool)'
     ]
   }
+  ABI.account = [
+    'function sessions(address) view returns (uint64 expiry, uint16 maxPremiumBps, uint16 maxDiscountBps, uint128 volumeCap, uint128 volumeUsed)',
+    'function startSession(address key, uint64 expiry, uint128 volumeCap, uint16 maxPremiumBps, uint16 maxDiscountBps) payable',
+    'function endSession(address key)',
+    'function buyInPool(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut) returns (uint256)',
+    'function sellInPool(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut) returns (uint256)',
+    'function buyPrimary(uint256 fundIndex, uint256 tokenAmount)',
+    'function withdrawToOwner(address token, uint256 amount)'
+  ]
+  ABI.accounts = [
+    'function accountOf(address) view returns (address)',
+    'function create(address key, uint64 expiry, uint128 volumeCap, uint16 maxPremiumBps, uint16 maxDiscountBps) payable returns (address)'
+  ]
   const IFACE = { fund: new E.Interface(ABI.fund), pool: new E.Interface(ABI.pool), vesting: new E.Interface(ABI.vesting) }
 
   const state = {
@@ -843,7 +856,7 @@
   // ---------- Portfolio ----------
   function renderPortfolio() {
     const m = state.me
-    let h = '<section class="pfhead"><div><h1>Portfolio</h1><p class="lead">' + (state.account ? 'Wallet ' + link(state.account) + ' · values at the pool price' : 'No wallet connected') + '</p></div></section>'
+    let h = '<section class="pfhead"><div><h1>Portfolio</h1><p class="lead">' + (state.account ? (tkOn() ? 'Trading account ' : 'Wallet ') + link(state.account) + ' · values at the pool price' : 'No wallet connected') + '</p></div></section>'
     if (!m) {
       h += '<div class="tp pfnone">' + (window.ethereum ? 'Connect a wallet on ' + esc(CFG.network) + ' to see its holdings.' : 'This browser has no wallet. Reading works without one; holdings need MetaMask.') + '</div>'
     } else {
@@ -918,7 +931,8 @@
       } catch (e) { /* stay read-only */ }
     }
     state.mm = { account: state.account, signer: state.signer, chainOk: state.walletChainOk }
-    if (tkOn()) { state.account = state.tk.wallet.address; state.signer = keySigner(); state.walletChainOk = true }
+    await tkLoad()
+    if (tkOn()) { state.account = state.tk.acct; state.signer = keySigner(); state.walletChainOk = true }
     state.me = null
     renderWallet(); buildActions(true)
     refresh(true)
@@ -942,132 +956,230 @@
   function renderWallet() {
     const chip = $('walletChip'), m = state.me
     const set = (role, text, disabled) => { chip.dataset.role = role; chip.disabled = !!disabled; chip.querySelector('span').textContent = text }
-    if (tkOn()) set('key', '⚡ ' + short(state.tk.wallet.address))
+    if (tkOn()) set('key', '⚡ ' + short(state.tk.acct))
     else if (!window.ethereum) set('none', 'Read-only', true)
     else if (!state.account) set('connect', 'Connect wallet')
     else if (!state.walletChainOk) set('connect', 'Switch network')
     else set(m && m.isGP ? 'gp' : 'investor', short(state.account) + (m && m.isGP ? ' · GP' : ''))
   }
 
-  // ---------- trading key: fast trading without a wallet pop-up per order ----------
-  // Like an agent key on Hyperliquid: a key created in this browser signs orders itself.
-  // It trades from its own balance: mint test mUSDC to it, top it up with a little gas from
-  // the wallet once, send everything back when done. Meant for test networks only: the key
-  // sits in this browser's storage.
+  // ---------- fast trading: trading account + session key ----------
+  // The investor's funds sit in a TradingAccount contract that only their wallet owns.
+  // A session key created in this browser may trade for it - only in this umbrella's pools
+  // and primary sales, until an expiry, up to a volume cap and within price limits around
+  // NAV - and may send funds back to the owner, never anywhere else. Like an agent key on
+  // Hyperliquid: orders go out without a wallet pop-up. The key itself holds only gas.
   const TK = 'perma.tk.' + CFG.chainId
   const store = {
     get: (k) => { try { return localStorage.getItem(k) } catch (e) { return null } },
     set: (k, val) => { try { if (val === null) localStorage.removeItem(k); else localStorage.setItem(k, val) } catch (e) { /* memory only */ } }
   }
-  state.tk = { wallet: null, on: false, eth: null, nonce: null, del: false }
-  try { const pk = store.get(TK); if (pk) { state.tk.wallet = new E.Wallet(pk); state.tk.on = store.get(TK + '.on') === '1' } } catch (e) { state.tk.wallet = null }
-  function tkOn() { return !!(state.tk.on && state.tk.wallet) }
-  function keySigner() { if (!state.provider) state.provider = makeProvider(state.rpcIndex); return state.tk.wallet.connect(state.provider) }
+  state.tk = { wallet: null, on: false, eth: null, nonce: null, del: false, acct: null, owner: null, sess: null, mode: null }
+  try {
+    const pk = store.get(TK)
+    if (pk) { state.tk.wallet = new E.Wallet(pk); state.tk.on = store.get(TK + '.on') === '1'; state.tk.acct = store.get(TK + '.acct'); state.tk.owner = store.get(TK + '.owner') }
+  } catch (e) { state.tk.wallet = null }
   const TK_LOW = E.parseEther('0.0002')
+  const SESSION_ONLY = { swapbuy: 1, sell: 1, buy: 1, faucet: 1, mint: 1 }      // routed through the trading account
+  const SESSION_DIRECT = { buyback: 1, fee: 1, close: 1, execute: 1 }          // need no funds: the key calls the fund itself
+  const sessActive = () => !!(state.tk.sess && Number(state.tk.sess.expiry) > now())
+  function tkOn() { return !!(state.tk.on && state.tk.wallet && state.tk.acct && sessActive()) }
+  function keySigner() { if (!state.provider) state.provider = makeProvider(state.rpcIndex); return state.tk.wallet.connect(state.provider) }
   // Nonce kept locally: public endpoints behind load balancers can lag one block behind.
   async function tkNonce() {
     const n = await read((p) => p.getTransactionCount(state.tk.wallet.address, 'pending'))
     return state.tk.nonce == null ? n : Math.max(n, state.tk.nonce)
   }
+  async function tkLoad() {
+    const mm = state.mm || {}
+    if (CFG.tradingAccounts && mm.account) {
+      try {
+        const a = await read((p) => new E.Contract(CFG.tradingAccounts, ABI.accounts, p).accountOf(mm.account))
+        state.tk.acct = a === E.ZeroAddress ? null : a
+        state.tk.owner = mm.account
+        store.set(TK + '.acct', state.tk.acct); store.set(TK + '.owner', state.tk.acct ? mm.account : null)
+      } catch (e) { /* keep what we had */ }
+    }
+    if (state.tk.acct && state.tk.wallet) {
+      try { state.tk.sess = await read((p) => new E.Contract(state.tk.acct, ABI.account, p).sessions(state.tk.wallet.address)) } catch (e) { /* keep */ }
+    } else state.tk.sess = null
+  }
   async function tkBalance() {
-    if (!state.tk.wallet) return
-    try { state.tk.eth = await read((p) => p.getBalance(state.tk.wallet.address)) } catch (e) { /* keep the last value */ }
+    if (state.tk.wallet) { try { state.tk.eth = await read((p) => p.getBalance(state.tk.wallet.address)) } catch (e) { /* keep */ } }
+    if (state.tk.acct && state.tk.wallet) { try { state.tk.sess = await read((p) => new E.Contract(state.tk.acct, ABI.account, p).sessions(state.tk.wallet.address)) } catch (e) { /* keep */ } }
+    // Session ran out while in use: fall back to MetaMask.
+    if (state.tk.on && state.account && state.tk.acct && state.account === state.tk.acct && !tkOn()) { log('The session has ended: signing with MetaMask again.', true); await syncWallet() }
     renderTk()
   }
   function signLine() {
-    if (tkOn()) return '<div class="qrow"><span>Signing</span><span>⚡ trading key · <button class="tlink" data-tk="off">use MetaMask</button></span></div>'
-    return '<div class="qrow"><span>Signing</span><span>MetaMask · <button class="tlink" data-tk="' + (state.tk.wallet ? 'on">use trading key' : 'goto">set up fast trading') + '</button></span></div>'
+    if (!CFG.tradingAccounts) return ''
+    if (tkOn()) return '<div class="qrow"><span>Signing</span><span>⚡ session key · <button class="tlink" data-tk="off">use MetaMask</button></span></div>'
+    const ready = state.tk.wallet && state.tk.acct && sessActive()
+    return '<div class="qrow"><span>Signing</span><span>MetaMask · <button class="tlink" data-tk="' + (ready ? 'on">use session key' : 'goto">set up fast trading') + '</button></span></div>'
+  }
+  const fmtLeft = (s) => s <= 0 ? 'expired' : s < 3600 ? Math.ceil(s / 60) + ' min left' : Math.floor(s / 3600) + ' h ' + Math.floor((s % 3600) / 60) + ' min left'
+  function tkForm(btn, act) {
+    const f = (id, label, val, unit) => '<label class="tkf"><small>' + label + '</small><span class="field"><input id="' + id + '" inputmode="decimal" autocomplete="off" value="' + val + '"><span class="unit">' + unit + '</span></span></label>'
+    return '<div class="tkform">' + f('tk-h', 'Session length', '24', 'hours') + f('tk-cap', 'Volume cap', '1000000', 'mUSDC') +
+      f('tk-prem', 'Buy at most', '10', '% above NAV') + f('tk-disc', 'Sell at least', '20', '% below NAV') + '</div>' +
+      '<button class="btn" data-tk="' + act + '"' + ((state.mm || {}).signer ? '' : ' disabled') + '>' + btn + '</button>' +
+      '<p class="note">One MetaMask confirmation. It also sends ' + esc(CFG.tkGas || '0.002') + ' ETH to the session key for gas.</p>'
   }
   function renderTk() {
-    const w = state.tk.wallet, mm = state.mm || {}
-    let h = '<div class="card tkcard"><h3>Fast trading</h3>'
-    if (!w) {
-      h += '<p class="lead">Trade without a wallet pop-up for every order, like an agent key on Hyperliquid. A trading key is created in this browser and signs orders itself. ' +
-        'It trades from its own balance: you top it up with a little gas once, mint test mUSDC to it and send everything back when you are done.</p>' +
-        '<button class="btn" data-tk="create">Create trading key</button>'
-    } else {
-      const eth = state.tk.eth
-      const low = eth !== null && eth < TK_LOW
-      h += '<dl class="kv"><dt>Trading key</dt><dd><a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/address/' + esc(w.address) + '">' + esc(short(w.address)) + '</a></dd>' +
-        '<dt>Gas</dt><dd' + (low ? ' class="dn"' : '') + '>' + (eth === null ? '–' : Number(E.formatEther(eth)).toFixed(5) + ' ETH') + '</dd>' +
-        '<dt>Signing now</dt><dd>' + (tkOn() ? '⚡ trading key' : 'MetaMask') + '</dd></dl>' +
-        '<div class="tkbtns"><button class="btn' + (tkOn() ? ' ghost' : '') + ' sm" data-tk="' + (tkOn() ? 'off">Use MetaMask' : 'on">Use trading key') + '</button>' +
-        '<button class="btn ghost sm" data-tk="fund"' + (mm.signer ? '' : ' disabled') + '>Top up gas: ' + esc(CFG.tkGas || '0.002') + ' ETH from MetaMask</button>' +
-        '<button class="btn ghost sm" data-tk="sweep"' + (mm.account ? '' : ' disabled') + '>Send everything back' + (mm.account ? ' to ' + esc(short(mm.account)) : '') + '</button>' +
-        '<button class="btn ghost sm" data-tk="del">' + (state.tk.del ? 'Click again: delete the key' : 'Delete key') + '</button></div>' +
-        (low ? '<p class="note dn">Almost no gas left: top it up before trading.</p>' : '') +
-        (mm.signer ? '' : '<p class="note">Topping up and sending back need MetaMask connected on ' + esc(CFG.network) + '.</p>')
+    const w = state.tk.wallet, mm = state.mm || {}, acct = state.tk.acct, s = state.tk.sess
+    const mode = !CFG.tradingAccounts ? 'none' : !acct ? (mm.account ? 'create' : 'connect') : sessActive() ? 'active' : 'start'
+    if (state.tk.mode !== mode + !!mm.signer) {
+      state.tk.mode = mode + !!mm.signer
+      let h = '<div class="card tkcard"><h3>Fast trading</h3>'
+      if (mode === 'none') h += '<p class="lead">Fast trading needs the trading-account contract, which is not deployed on ' + esc(CFG.network) + ' yet.</p>'
+      else if (mode === 'connect') h += '<p class="lead">Connect MetaMask: the trading account belongs to your wallet.</p>'
+      else if (mode === 'create') h += '<p class="lead">Trade without a wallet pop-up for every order, like an agent key on Hyperliquid. Your funds sit in a trading account that only your wallet owns. ' +
+        'A session key in this browser may trade for it within the limits below and can send funds back to you, never anywhere else.</p>' + tkForm('Create trading account and start session', 'create')
+      else if (mode === 'start') h += '<p class="lead">No active session in this browser. Start one: a new session key is allowed to trade for your account within these limits.</p>' + tkForm('Start session', 'start')
+      else h += '<p class="lead">Orders are signed by the session key: no pop-ups. It can only trade within the limits shown and send funds back to your wallet.</p>'
+      h += '<div id="tk-status"></div><div class="tkbtns" id="tk-btns"></div>'
+      if (mode === 'active' || mode === 'start') h += '<div class="tkdep"><label class="tkf"><small>Deposit from your wallet</small><span class="field"><input id="tk-dep" inputmode="decimal" autocomplete="off" placeholder="0"><span class="unit">mUSDC</span></span></label><button class="btn ghost sm" data-tk="deposit">Deposit (MetaMask)</button></div>'
+      h += '<p class="note">If this browser is lost or the key is stolen, the worst case is bad trades within these limits until the session ends. The key can never withdraw: everything goes back to your wallet only. ' +
+        'You can end the session from MetaMask at any time. The contract is a prototype and not audited.</p></div>'
+      $('tk').innerHTML = h; $('tk').__h = null
     }
-    h += '<p class="note">Test networks only. The key lives in this browser\'s storage: anyone using this browser can trade with it, and clearing site data deletes it. Send everything back first. GP actions still go through MetaMask.</p></div>'
-    PUT('tk').h = h
+    if (mode === 'none' || mode === 'connect') {
+      // A key from before may still hold gas or tokens of its own: let it send them home.
+      PUT('tk-btns').h = w && state.tk.eth > 0n && (mm.account || state.tk.owner) ? '<button class="btn ghost sm" data-tk="gas">Return the key\'s gas to ' + esc(short(mm.account || state.tk.owner)) + '</button>' : ''
+      PUT('tk-status').h = ''
+      return
+    }
+    let st = ''
+    if (acct) {
+      st = '<dl class="kv"><dt>Trading account</dt><dd>' + link(acct) + '</dd>'
+      if (w) st += '<dt>Session key</dt><dd>' + link(w.address) + '</dd>'
+      if (s && Number(s.expiry) > 0) {
+        st += '<dt>Session</dt><dd' + (sessActive() ? '' : ' class="dn"') + '>' + fmtLeft(Number(s.expiry) - now()) + '</dd>' +
+          '<dt>Volume used</dt><dd>' + amt(s.volumeUsed) + ' of ' + amt(s.volumeCap) + ' mUSDC</dd>' +
+          '<dt>Price limits</dt><dd>buy ≤ NAV +' + (Number(s.maxPremiumBps) / 100) + '% · sell ≥ NAV −' + (Number(s.maxDiscountBps) / 100) + '%</dd>'
+      }
+      if (w) st += '<dt>Key gas</dt><dd' + (state.tk.eth !== null && state.tk.eth < TK_LOW ? ' class="dn"' : '') + '>' + (state.tk.eth === null ? '–' : Number(E.formatEther(state.tk.eth)).toFixed(5) + ' ETH') + '</dd>'
+      st += '<dt>Signing now</dt><dd>' + (tkOn() ? '⚡ session key' : 'MetaMask') + '</dd></dl>'
+    }
+    PUT('tk-status').h = st
+    let b = ''
+    if (mode === 'active') {
+      b += '<button class="btn' + (tkOn() ? ' ghost' : '') + ' sm" data-tk="' + (tkOn() ? 'off">Use MetaMask' : 'on">Use session key') + '</button>'
+      b += '<button class="btn ghost sm" data-tk="withdraw">Send everything to my wallet</button>'
+      b += '<button class="btn ghost sm" data-tk="end">End session, return gas</button>'
+    } else if (mode === 'start') {
+      b += '<button class="btn ghost sm" data-tk="withdraw"' + (mm.signer ? '' : ' disabled') + '>Send everything to my wallet (MetaMask)</button>'
+      if (w && state.tk.eth > 0n) b += '<button class="btn ghost sm" data-tk="gas">Return the key\'s gas</button>'
+    }
+    PUT('tk-btns').h = b
   }
   async function tkSend(label, make) {
     const s = keySigner(), k = await tkNonce()
-    log(label + ' – signed by the trading key…')
+    log(label + ' – signed by the session key…')
     const tx = await make(s, k)
     state.tk.nonce = k + 1
     const t0 = Date.now(), rc = await confirmFast(tx)
     log('  confirmed in block ' + rc.blockNumber + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.')
   }
+  async function mmSend(label, make) {
+    log(label + ' – confirm in your wallet…')
+    const tx = await make(state.mm.signer)
+    log('  sent, waiting for confirmation…')
+    const t0 = Date.now(), rc = await confirmFast(tx)
+    log('  confirmed in block ' + rc.blockNumber + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.')
+  }
+  function sessionParams() {
+    const val = (id) => Number(String($(id).value).replace(',', '.'))
+    const hours = val('tk-h'), cap = val('tk-cap'), prem = val('tk-prem'), disc = val('tk-disc')
+    if (!(hours > 0 && hours <= 720)) throw new Error('Session length: 1 to 720 hours.')
+    if (!(cap > 0)) throw new Error('Enter a volume cap.')
+    if (!(prem >= 0 && prem <= 50 && disc >= 0 && disc <= 50)) throw new Error('Price limits: 0 to 50%.')
+    return [BigInt(Math.floor(now() + hours * 3600)), E.parseUnits(String(cap), 6), Math.round(prem * 100), Math.round(disc * 100)]
+  }
+  // Everything the key holds itself (gas, tokens of a key from before) back to the owner.
+  async function returnKeyFunds(to) {
+    const addr = state.tk.wallet.address
+    for (const [t, sym] of [[CFG.usdc, 'mUSDC'], ...state.funds.map((f) => [f.token, f.symbol || 'tokens'])]) {
+      const bal = await read((p) => new E.Contract(t, ABI.erc20, p).balanceOf(addr))
+      if (bal > 0n) await tkSend('Returning ' + amt(bal) + ' ' + sym + ' held by the key', (s, nonce) => new E.Contract(t, ABI.erc20, s).transfer(to, bal, Object.assign(feeOverrides(), { nonce })))
+    }
+    const bal = await read((p) => p.getBalance(addr))
+    const blk = await read((p) => p.getBlock('latest'))
+    const tip = CFG.fees ? E.parseUnits(CFG.fees.priorityGwei, 'gwei') : 0n
+    const maxFee = (blk && blk.baseFeePerGas ? blk.baseFeePerGas * 2n : E.parseUnits('1', 'gwei')) + tip
+    const gas = await read((p) => p.estimateGas({ from: addr, to, value: 1n }))
+    const value = bal - gas * maxFee
+    if (value > 0n) await tkSend('Returning ' + Number(E.formatEther(value)).toFixed(5) + ' ETH of gas', (s, nonce) => s.sendTransaction({ to, value, gasLimit: gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: tip, nonce }))
+  }
+  // A fresh key for every session, so a key that may have been copied is never re-enabled.
+  // Whatever the old key still holds goes back to the owner first.
+  async function freshKey(to) {
+    if (state.tk.wallet) {
+      try { state.tk.eth = await read((p) => p.getBalance(state.tk.wallet.address)) } catch (e) { /* ignore */ }
+      if (state.tk.eth > 0n) { try { await returnKeyFunds(to) } catch (e) { log('Could not return the old key\'s gas: ' + reason(e), true) } }
+    }
+    const w = E.Wallet.createRandom()
+    state.tk.wallet = new E.Wallet(w.privateKey); state.tk.nonce = null; state.tk.eth = null; state.tk.sess = null
+    store.set(TK, w.privateKey)
+    return state.tk.wallet
+  }
   async function tkClick(what) {
     if (state.busy) return
     if (what === 'goto') { setTab('portfolio'); return }
-    if (what === 'create') {
-      const w = E.Wallet.createRandom()
-      state.tk.wallet = new E.Wallet(w.privateKey); state.tk.on = true; state.tk.nonce = null
-      store.set(TK, w.privateKey); store.set(TK + '.on', '1')
-      log('Trading key created: ' + w.address + '. Top it up with gas, then mint test mUSDC to it.')
-      await syncWallet(); tkBalance(); return
-    }
     if (what === 'on' || what === 'off') {
       state.tk.on = what === 'on'; state.tk.nonce = null; store.set(TK + '.on', state.tk.on ? '1' : '0')
       await syncWallet(); renderTk(); return
     }
-    if (what === 'del') {
-      if (!state.tk.del) { state.tk.del = true; renderTk(); setTimeout(() => { state.tk.del = false; renderTk() }, 4000); return }
-      store.set(TK, null); store.set(TK + '.on', null)
-      state.tk = { wallet: null, on: false, eth: null, nonce: null, del: false }
-      log('Trading key deleted from this browser.')
-      await syncWallet(); renderTk(); return
-    }
-    const mm = state.mm || {}, addr = state.tk.wallet && state.tk.wallet.address
-    if (!addr) return
+    const mm = state.mm || {}
     state.busy = true; updateActions()
     try {
-      if (what === 'fund') {
+      if (what === 'create' || what === 'start') {
         if (!mm.signer) throw new Error('Connect MetaMask on ' + CFG.network + ' first.')
+        const params = sessionParams()
+        const key = await freshKey(mm.account)
         const value = E.parseEther(CFG.tkGas || '0.002')
-        log('Topping up the trading key with ' + (CFG.tkGas || '0.002') + ' ETH – confirm in your wallet…')
-        const tx = await mm.signer.sendTransaction(Object.assign({ to: addr, value }, feeOverrides()))
-        const t0 = Date.now(), rc = await confirmFast(tx)
-        log('  confirmed in block ' + rc.blockNumber + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.')
-      } else if (what === 'sweep') {
-        if (!mm.account) throw new Error('Connect MetaMask first: everything goes back to that address.')
-        const to = mm.account
+        if (what === 'create') {
+          const fac = new E.Contract(CFG.tradingAccounts, ABI.accounts, mm.signer)
+          try { await fac.create.staticCall(key.address, ...params, { value }) } catch (e) { throw new Error('Blocked by the contract: ' + reason(e)) }
+          await mmSend('Creating the trading account and starting a session', () => fac.create(key.address, ...params, Object.assign({ value }, feeOverrides())))
+        } else {
+          const acc = new E.Contract(state.tk.acct, ABI.account, mm.signer)
+          try { await acc.startSession.staticCall(key.address, ...params, { value }) } catch (e) { throw new Error('Blocked by the contract: ' + reason(e)) }
+          await mmSend('Starting a session', () => acc.startSession(key.address, ...params, Object.assign({ value }, feeOverrides())))
+        }
+        state.tk.on = true; store.set(TK + '.on', '1')
+        await tkLoad(); await syncWallet()
+        log('Session started. Orders are now signed by the session key. Mint test mUSDC or deposit from your wallet, then trade.')
+      } else if (what === 'deposit') {
+        const raw = String($('tk-dep').value).replace(/[,\s_]/g, '')
+        if (!raw || !(Number(raw) > 0)) throw new Error('Enter an amount to deposit.')
+        const a = E.parseUnits(raw, 6)
+        await mmSend('Depositing ' + amt(a) + ' mUSDC into the trading account', (s) => new E.Contract(CFG.usdc, ABI.erc20, s).transfer(state.tk.acct, a, feeOverrides()))
+        $('tk-dep').value = ''
+      } else if (what === 'withdraw') {
         const assets = [[CFG.usdc, 'mUSDC'], ...state.funds.map((f) => [f.token, f.symbol || 'tokens'])]
         let moved = 0
         for (const [t, sym] of assets) {
-          const bal = await read((p) => new E.Contract(t, ABI.erc20, p).balanceOf(addr))
+          const bal = await read((p) => new E.Contract(t, ABI.erc20, p).balanceOf(state.tk.acct))
           if (bal === 0n) continue
-          await tkSend('Returning ' + amt(bal) + ' ' + sym, (s, nonce) => new E.Contract(t, ABI.erc20, s).transfer(to, bal, Object.assign(feeOverrides(), { nonce })))
+          const label = 'Sending ' + amt(bal) + ' ' + sym + ' to your wallet'
+          if (tkOn()) await tkSend(label, (s, nonce) => new E.Contract(state.tk.acct, ABI.account, s).withdrawToOwner(t, bal, Object.assign(feeOverrides(), { nonce })))
+          else { if (!mm.signer) throw new Error('Connect MetaMask first.'); await mmSend(label, (s) => new E.Contract(state.tk.acct, ABI.account, s).withdrawToOwner(t, bal, feeOverrides())) }
           moved++
         }
-        // Gas last: whatever is left after the fee of this transfer.
-        const bal = await read((p) => p.getBalance(addr))
-        const blk = await read((p) => p.getBlock('latest'))
-        const tip = CFG.fees ? E.parseUnits(CFG.fees.priorityGwei, 'gwei') : 0n
-        const maxFee = (blk && blk.baseFeePerGas ? blk.baseFeePerGas * 2n : E.parseUnits('1', 'gwei')) + tip
-        const gas = await read((p) => p.estimateGas({ from: addr, to, value: 1n }))
-        const value = bal - gas * maxFee
-        if (value > 0n) {
-          await tkSend('Returning ' + Number(E.formatEther(value)).toFixed(5) + ' ETH', (s, nonce) => s.sendTransaction({ to, value, gasLimit: gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: tip, nonce }))
-          moved++
+        if (!moved) log('The trading account is empty.')
+      } else if (what === 'end' || what === 'gas') {
+        const to = mm.account || state.tk.owner
+        if (!to) throw new Error('Connect MetaMask: the gas goes back to your wallet.')
+        if (what === 'end' && sessActive()) {
+          await tkSend('Ending the session', (s, nonce) => new E.Contract(state.tk.acct, ABI.account, s).endSession(state.tk.wallet.address, Object.assign(feeOverrides(), { nonce })))
         }
-        if (!moved) log('Nothing to send back: the trading key is empty.')
-        else log('Sent back to ' + short(to) + '. A tiny amount of ETH stays behind to cover the last fee.')
+        await returnKeyFunds(to)
+        if (what === 'end') { state.tk.on = false; store.set(TK + '.on', '0') }
+        await tkLoad(); await syncWallet()
       }
     } catch (e) {
-      log('Fast trading: ' + reason(e), true)
+      log('Fast trading: ' + (e.message && e.message.startsWith('Blocked') ? e.message : reason(e)), true)
     } finally {
       state.busy = false
       await refresh(true); tkBalance(); updateActions()
@@ -1192,6 +1304,14 @@
       steps: async (c) => [['Withdrawing locked votes', c.fund, 'withdrawVotes', [c.d.proposalId]]] }
   ]
   const ACT = Object.fromEntries(ACTIONS.map((a) => [a.id, a]))
+  // With a session key, trades go through the trading account; the key holds no funds.
+  const SESSION_STEPS = {
+    swapbuy: async (c, v) => { const out = await c.pool.quoteUSDCForToken(v.a); return [['Buying in the pool via the trading account', c.acct, 'buyInPool', [state.selected, v.a, (out * 99n) / 100n]]] },
+    sell: async (c, v) => { const out = await c.pool.quoteTokenForUSDC(v.a); return [['Selling in the pool via the trading account', c.acct, 'sellInPool', [state.selected, v.a, (out * 99n) / 100n]]] },
+    buy: async (c, v) => [['Buying in the primary sale via the trading account', c.acct, 'buyPrimary', [state.selected, v.a]]],
+    faucet: async (c) => [['Minting 100,000 test mUSDC to the trading account', c.usdc, 'mint', [c.account, 100000n * U6]]],
+    mint: async (c, v) => [['Minting test mUSDC to the trading account', c.usdc, 'mint', [c.account, v.a]]]
+  }
 
   async function approval(c, erc20, spender, amount, label) {
     const cur0 = await erc20.allowance(c.account, spender)
@@ -1258,7 +1378,8 @@
       let why = '', soft = false
       if (!d) { why = 'Loading…'; soft = true }
       else if (!state.signer) { why = a.why(d, null); if (!why) { why = 'Connect a wallet on ' + CFG.network + ' to send this.'; soft = true } }
-      else why = (a.gp && m && !m.isGP ? 'Only the GP of this sub-fund can do this.' : '') || a.why(d, m)
+      else why = (tkOn() && !SESSION_ONLY[a.id] && !SESSION_DIRECT[a.id] ? 'The session key can only trade: switch to MetaMask for this.' : '') ||
+        (a.gp && m && !m.isGP ? 'Only the GP of this sub-fund can do this.' : '') || a.why(d, m)
       if (a.term) row.hidden = a.term !== state.side
       else if (a.show && (row.classList.contains('card') || row.closest('.light'))) row.hidden = !!d && !a.show(d, m)
       const note = row.querySelector('.why')
@@ -1327,21 +1448,22 @@
     let v
     try { v = readFields(a, row) } catch (e) { log(a.title + ': ' + e.message, true); return }
     state.busy = true; updateActions()
-    if (tkOn() && state.tk.eth !== null && state.tk.eth < TK_LOW) { log('The trading key has almost no gas left: top it up under Portfolio › Fast trading.', true); return }
+    if (tkOn() && state.tk.eth !== null && state.tk.eth < TK_LOW) { log('The session key has almost no gas left: start a new session under Portfolio › Fast trading.', true); return }
     const f = cur(), s = tkOn() ? keySigner() : state.signer
     const c = {
       account: state.account, f, d: state.detail,
       fund: new E.Contract(f.fund, ABI.fund, s), token: new E.Contract(f.token, ABI.erc20, s),
       pool: new E.Contract(f.pool, ABI.pool, s), vesting: new E.Contract(f.vesting, ABI.vesting, s),
-      usdc: new E.Contract(CFG.usdc, ABI.erc20, s)
+      usdc: new E.Contract(CFG.usdc, ABI.erc20, s),
+      acct: tkOn() ? new E.Contract(state.tk.acct, ABI.account, s) : null
     }
     try {
-      const steps = (await a.steps(c, v)).filter(Boolean)
+      const steps = (await (tkOn() && SESSION_STEPS[a.id] ? SESSION_STEPS[a.id] : a.steps)(c, v)).filter(Boolean)
       for (let i = 0; i < steps.length; i++) {
         const [label, contract, method, args] = steps[i]
         const fn = contract.getFunction(method)
         try { await fn.staticCall(...args) } catch (e) { throw new Error('Blocked by the contract: ' + reason(e)) }
-        log((steps.length > 1 ? 'Step ' + (i + 1) + '/' + steps.length + ': ' : '') + label + (tkOn() ? ' – signed by the trading key…' : ' – confirm in your wallet…'))
+        log((steps.length > 1 ? 'Step ' + (i + 1) + '/' + steps.length + ': ' : '') + label + (tkOn() ? ' – signed by the session key…' : ' – confirm in your wallet…'))
         const opts = feeOverrides(), k = tkOn() ? await tkNonce() : null
         if (k !== null) opts.nonce = k
         const tx = await fn(...args, opts)
