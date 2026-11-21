@@ -80,6 +80,27 @@ The numbers are from a run of exactly these steps on a local chain.
 | 7 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1512; the discount widens to 16.7% and the buyback is triggered again |
 | 8 | Funds, Rules, after one demo year: mint the fee tranche | 2% of supply in new tokens, locked in vesting |
 
+### Variant: sell out the whole sale first
+
+Here the market only opens once all 9,500,000 tokens are sold, and then anyone (not just
+the GP) can close the sale. Numbers from a local run with one non-GP wallet:
+
+| Step | Where | Result |
+|---|---|---|
+| 1 | Portfolio: get test mUSDC, 9,500,000 | Wallet funded |
+| 2 | Trade: primary sale, 9,500,000 | Sale sold out; the close button opens for every wallet |
+| 3 | Trade: close the sale, open the market | 500,000 pBUY + 500,000 mUSDC become fund-owned liquidity; vault cash 9,000,000; NAV and price $1.00 |
+| 4 | Trade: sell 30,000 | Market $0.8901, NAV $1.0002, discount 11.0%: buyback triggered |
+| 5 | Funds, Rules: trigger the buyback, field empty | 28,328 mUSDC, price back to $1.0001 |
+
+The pool is deeper here (500,000 instead of 52,632 tokens), so it takes a larger sale to
+move the price. In step 5 the 1% limit would be 90,000 mUSDC, but the contract refuses
+any buyback that ends above NAV. With the field empty, the dashboard therefore sends the
+largest amount that stays at NAV.
+
+The contract does not force a sell-out: the GP can still close early once anything is
+sold. Enforcing it would mean changing `closeSale` and deploying again.
+
 The wallet that deployed the contracts is the GP of all three sub-funds. The GP cannot vote
 on his own removal, so the governance steps need a second wallet that holds tokens.
 

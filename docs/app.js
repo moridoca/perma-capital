@@ -991,7 +991,8 @@
       why: (d) => !d.saleClosed ? 'Opens with the market.' : d.marketPrice >= d.buybackTriggerPrice ? 'The market is not more than 10% below NAV.' :
         Number(d.lastBuyback) + Math.floor(state.year / 52) > now() ? 'Cooldown: ' + dur(Number(d.lastBuyback) + Math.floor(state.year / 52) - now()) + '.' :
           d.maxBuyback === 0n ? 'The vault holds no cash.' : '',
-      steps: async (c, v) => [['Triggering the buyback', c.fund, 'buyback', [v.a === null ? c.d.maxBuyback : v.a]]] },
+      pre: (d, m, v) => v.a === null && d.saleClosed ? 'Empty sends ' + amt(buybackAmount(d)) + ' mUSDC: the 1% limit, or less where that would lift the price above NAV.' : '',
+      steps: async (c, v) => [['Triggering the buyback', c.fund, 'buyback', [v.a === null ? buybackAmount(c.d) : v.a]]] },
     { id: 'fee', inline: true, title: 'Mint the yearly management fee', btn: 'Mint fee tranche', fields: [],
       show: (d) => d.saleClosed,
       why: (d) => !d.saleClosed ? 'Starts when the sale closes.' : d.feeTranchesMinted >= 10n ? 'Lifetime cap of 10 tranches reached.' :
@@ -1049,11 +1050,23 @@
       (f.type === 'amount' ? ' inputmode="decimal"' : '') + ' autocomplete="off" spellcheck="false">' +
       (f.unit ? '<span class="unit"' + (f.unit === 'token' ? ' data-unit="token">token' : '>' + f.unit) + '</span>' : '') + '</label>').join('')
   }
+  // Largest buyback within the 1% limit that leaves the pool price at or just below NAV.
+  // The contract reverts a buyback that ends above NAV; with a large vault the 1% limit alone can.
+  function buybackAmount(d) {
+    const T = d.reserveToken, U = d.reserveUSDC, cap = d.maxBuyback, lim = (d.navPerToken * 9999n) / 10000n
+    if (!T || !U || !cap) return cap
+    const after = (a) => { const inF = a * 9970n, out = (inF * T) / (U * 10000n + inF); return ((U + a) * U6) / (T - out) }
+    if (after(cap) <= lim) return cap
+    let lo = 0n, hi = cap
+    while (hi - lo > 1n) { const mid = (lo + hi) / 2n; if (after(mid) <= lim) lo = mid; else hi = mid }
+    return lo
+  }
+
   function actHtml(a, o) {
     o = o || {}
     const chips = a.chips ? '<div class="chips">' + a.chips.map((c, i) => '<button type="button" class="chip" data-chip="' + i + '">' + c.l + '</button>').join('') + '</div>' : ''
     const cls = 'btn go' + (a.ghost || o.ghost ? ' ghost' : '')
-    if (a.inline || o.inline) return '<div class="act" data-a="' + a.id + '">' + fieldsHtml(a) + '<button class="' + cls + ' sm">' + a.btn + '</button><p class="note why"></p></div>'
+    if (a.inline || o.inline) return '<div class="act" data-a="' + a.id + '">' + fieldsHtml(a) + '<button class="' + cls + ' sm">' + a.btn + '</button>' + (a.pre ? '<p class="note pre"></p>' : '') + '<p class="note why"></p></div>'
     return '<div class="card act" data-a="' + a.id + '"><h3>' + a.title + '</h3>' + (a.lead ? '<p class="lead">' + a.lead + '</p>' : '') + fieldsHtml(a) + chips +
       '<p class="note pre"></p><p class="note why"></p><button class="' + cls + '">' + a.btn + '</button></div>'
   }
