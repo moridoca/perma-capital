@@ -95,13 +95,13 @@ The numbers are from a run of exactly these steps on a local chain.
 |---|---|---|
 | 1 | Portfolio: get test mUSDC, 2,000,000 | Wallet funded |
 | 2 | Trade: primary sale, 1,000,000 | 1,000,000 pBUY at $1.00 |
-| 3 | Trade: close the sale, open the market (GP) | 52,632 mUSDC become fund-owned liquidity: 50 bids from NAV −0.2% down to NAV −10%. Nothing is on offer yet, so the market price is the top bid, $0.9980 |
-| 4 | Funds, Manager: deploy capital, 600,000 | NAV stays $1.00; vault cash 347,368 |
+| 3 | Trade: close the sale, open the market (GP) | 50,000 mUSDC (5% of the sale) become fund-owned liquidity: 250 bids from NAV −0.2% down to NAV −50%, 40% of the cash down to −10%, 30% to −20%, 20% to −40%, 10% to −50%. Nothing is on offer yet, so the market price is the top bid, $0.9980 |
+| 4 | Funds, Manager: deploy capital, 600,000 | NAV stays $1.00; vault cash 350,000 |
 | 5 | Trade: buy for 5,000 mUSDC | "Nothing on offer": no holder sells, and new tokens need a holder vote. The GP proposes an amount under Funds, Manager; the GP cannot vote, so approving it takes a second wallet that holds tokens (Govern) |
 | 6 | Trade: Limit, sell 10,000 at 1.0010 | Rests in the book below the issue price, marked "you"; listed under Open orders |
-| 7 | Trade: Market, sell 60,000 | The ladder's 50 bids take 55,511 pBUY at an average of $0.9475, the rest stays in the wallet. Market $0.9038, NAV $1.0031, discount 9.9%: buyback triggered |
-| 8 | Funds, Rules: trigger the buyback (empty = maximum) | 3,474 mUSDC from the vault buy 3,831 pBUY off the lowest rungs and burn them; the cash now bids there. Market $0.9093 |
-| 9 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1619. Every rung moves with it (top bid $1.1596). The limit order at $1.0010 keeps its price and is now the cheapest offer in the book |
+| 7 | Trade: Market, sell 25,000 | The ladder takes all of it over 62 rungs at an average of $0.9380. Market $0.8779, NAV $1.0016, discount 12.3%: past the −10% mark, so the buyback is open |
+| 8 | Funds, Rules: trigger the buyback (empty = maximum) | 3,500 mUSDC from the vault (1% of vault cash) buy 3,931 pBUY off the lowest rungs and burn them; the cash now bids there. Market $0.9019, discount 9.9% |
+| 9 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1554. Every rung moves with it (top bid $1.1531, lowest bid $0.5777). The limit order at $1.0010 keeps its price and is now the cheapest offer in the book |
 | 10 | Funds, Rules, after one demo year: mint the fee tranche | 2% of supply in new tokens, locked in vesting |
 
 ### Variant: sell out the whole sale first
@@ -113,13 +113,13 @@ the GP) can close the sale. Numbers from a local run with one non-GP wallet:
 |---|---|---|
 | 1 | Portfolio: get test mUSDC, 9,500,000 | Wallet funded |
 | 2 | Trade: primary sale, 9,500,000 | Sale sold out; the close button opens for every wallet |
-| 3 | Trade: close the sale, open the market | 500,000 mUSDC become fund-owned liquidity (10,000 on each of 50 bid rungs); vault cash 9,000,000; NAV $1.00, market $0.9980 (top bid) |
-| 4 | Trade: sell 600,000 | The book takes 527,359 pBUY at an average of $0.9475, the rest stays in the wallet. Market $0.9038, NAV $1.0031, discount 9.9%: buyback triggered |
-| 5 | Funds, Rules: trigger the buyback, field empty | 90,004 mUSDC (1% of vault cash) buy and burn 98,647 pBUY; market up to $0.9193 |
+| 3 | Trade: close the sale, open the market | 475,000 mUSDC become fund-owned liquidity (3,800 on each of the first 50 bid rungs, 2,850 on the next 50, 950 on each of the 150 below); vault cash 9,025,000; NAV $1.00, market $0.9980 (top bid) |
+| 4 | Trade: sell 250,000 | The book takes all of it at an average of $0.9346. Market $0.8700, NAV $1.0018, discount 13.2%: buyback open |
+| 5 | Funds, Rules: trigger the buyback, field empty | 90,252 mUSDC (1% of vault cash) buy and burn 100,206 pBUY; market up to $0.9261 |
 
-The ladder is deeper here: 10,000 mUSDC on each bid rung instead of 1,053, so it takes a
-larger sale to reach the bottom. The buyback buys at the lowest prices on offer, which are
-never above NAV once the market sits at the bottom of the ladder.
+The ladder is deeper here: 3,800 mUSDC on each of the top rungs instead of 400, so it takes
+a larger sale to move the price. The buyback opens once the market is 10% or more below NAV
+and buys at the lowest prices on offer, which are below NAV by then.
 
 The contract does not force a sell-out: the GP can still close early once anything is
 sold. Enforcing it would mean changing `closeSale` and deploying again.

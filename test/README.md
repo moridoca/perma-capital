@@ -7,7 +7,7 @@
 `compile.js` compiles every contract in `contracts/perma` (optimizer on, 200 runs) and
 prints the deployed size of each against the 24,576-byte limit. `book.test.js` deploys
 them on a local chain and checks the order book: the ladder around NAV, market and limit
-orders, cancelling, the session-key account, the buyback at the bottom of the ladder, and
+orders, cancelling, the session-key account, the buyback from NAV -10% down, the reserve top-up, and
 a run of random trading in which the book must hold exactly the ladder plus the escrow of
 open orders.
 

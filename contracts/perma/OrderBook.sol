@@ -17,9 +17,10 @@ interface INavSource {
 /// @title OrderBook - the secondary market of one sub-fund
 /// @notice An order book with three sources of liquidity:
 ///
-///         1. Below NAV, the fund's own ladder. The fund-owned cash sits on 50
+///         1. Below NAV, the fund's own ladder. The fund-owned cash sits on 250
 ///            rungs in equal steps of 0.2% of NAV, from NAV -0.2% down to
-///            NAV -10%. The rung prices are computed from the fund's live NAV,
+///            NAV -50%: 40% of it down to -10%, 30% down to -20%, 20% down to
+///            -40% and 10% below that. The rung prices are computed from the fund's live NAV,
 ///            so the ladder moves with NAV and never has to be re-quoted. A
 ///            rung that bought tokens offers them again 0.1% of NAV higher:
 ///            below NAV the price is found by trading, and on every round
@@ -39,7 +40,7 @@ interface INavSource {
 ///         nothing. A taker names the resting orders it wants to trade against
 ///         (best price first); the book takes the better price at every step.
 contract OrderBook {
-    uint256 public constant LEVELS = 50;        // bid rungs below NAV
+    uint256 public constant LEVELS = 250;       // bid rungs below NAV, down to NAV -50%
     uint256 public constant STEP_BPS = 20;      // one rung = 0.2% of NAV
     uint256 public constant RESALE_MARKUP_BPS = 10; // a rung sells 0.1% of NAV above the price it buys at
     uint256 public constant ISSUE_PREMIUM_BPS = 20; // new tokens are issued at NAV +0.2%
@@ -55,7 +56,7 @@ contract OrderBook {
     IERC20Like public immutable usdc;
     address public immutable fund;
 
-    /// @dev Rung 0 bids at NAV -10%, rung 49 at NAV -0.2%. Each offers at its bid +0.1% of NAV.
+    /// @dev Rung 0 bids at NAV -50%, rung 249 at NAV -0.2%. Each offers at its bid +0.1% of NAV.
     struct Rung {
         uint128 tokens; // bought at the rung's bid, offered at its ask
         uint128 cash;   // bids at the rung price
@@ -70,6 +71,10 @@ contract OrderBook {
     }
 
     Rung[RUNGS] private rungs;
+    /// @dev Where bids and resale offers meet: rungs below hold cash, rungs above hold
+    ///      tokens, this one may hold both. A trade starts here and reads only the rungs
+    ///      it walks through, so its cost does not depend on the length of the ladder.
+    uint256 public edge;
     uint128 private fundTokens;
     uint128 private fundCash;
     bool public seeded;
@@ -84,6 +89,7 @@ contract OrderBook {
     bool private locked;
 
     event Seeded(uint256 usdc);
+    event Refilled(uint256 usdc);
     event Issued(address indexed buyer, uint256 tokens, uint256 usdc);
     event Trade(address indexed trader, bool usdcForToken, uint256 amountIn, uint256 amountOut, uint256 priceAfter);
     event OrderPlaced(uint256 indexed id, address indexed maker, bool isBuy, uint256 price, uint256 tokens);
@@ -107,20 +113,60 @@ contract OrderBook {
     // The fund's ladder
     // ------------------------------------------------------------------
 
-    /// @notice The fund places its liquidity once, when the sale closes: the cash
-    ///         in equal parts on the 50 bid rungs. There is no function to take it out.
+    uint256 private constant WEIGHT_TOTAL = 1000;
+
+    /// @dev Share of the ladder's cash on one rung, in parts of WEIGHT_TOTAL:
+    ///      NAV to -10%: 40% (50 rungs of 8), to -20%: 30% (50 of 6), to -40%: 20%
+    ///      (100 of 2), to -50%: 10% (50 of 2). A first setting, to be refined with
+    ///      trading data; change it here and the sums must again add up to WEIGHT_TOTAL.
+    function _weight(uint256 i) private pure returns (uint256) {
+        uint256 depth = RUNGS - i; // 1 = NAV -0.2% ... 250 = NAV -50%
+        if (depth <= 50) return 8;
+        if (depth <= 100) return 6;
+        return 2;
+    }
+
+    /// @notice The fund places its liquidity once, when the sale closes: cash on
+    ///         every bid rung according to its weight. There is no function to take it out.
     function seed(uint256 usdcAmount) external nonReentrant {
         require(msg.sender == fund, "Book: only the fund");
         require(!seeded, "Book: already seeded");
-        require(usdcAmount >= LEVELS, "Book: zero amount");
+        require(usdcAmount >= WEIGHT_TOTAL, "Book: zero amount");
         seeded = true;
-        uint256 c = usdcAmount / LEVELS;
-        for (uint256 k = 0; k < LEVELS; k++) rungs[k].cash = uint128(c);
+        uint256 placed;
+        for (uint256 i = 0; i < RUNGS; i++) {
+            uint256 c = (usdcAmount * _weight(i)) / WEIGHT_TOTAL;
+            rungs[i].cash = uint128(c);
+            placed += c;
+        }
         // what the division leaves over goes to the rung next to NAV
-        rungs[LEVELS - 1].cash += uint128(usdcAmount - c * LEVELS);
+        rungs[RUNGS - 1].cash += uint128(usdcAmount - placed);
+        edge = RUNGS - 1;
         fundCash = uint128(usdcAmount);
         require(usdc.transferFrom(msg.sender, address(this), usdcAmount), "Book: usdc transfer failed");
         emit Seeded(usdcAmount);
+    }
+
+    /// @notice The fund adds cash to its bids: from the rung where the market stands
+    ///         downwards, each rung is brought up to its share of `target`, the ladder
+    ///         size the fund aims for. Rungs that hold tokens instead are left alone.
+    /// @return used mUSDC actually placed.
+    function refill(uint256 usdcAmount, uint256 target, uint256 maxRungs) external nonReentrant returns (uint256 used) {
+        require(msg.sender == fund, "Book: only the fund");
+        require(seeded, "Book: market not open");
+        for (uint256 i = edge + 1; i > 0 && maxRungs > 0 && used < usdcAmount; i--) {
+            maxRungs--;
+            uint256 want = (target * _weight(i - 1)) / WEIGHT_TOTAL;
+            uint256 have = rungs[i - 1].cash;
+            if (have >= want) continue;
+            uint256 add = want - have;
+            if (add > usdcAmount - used) add = usdcAmount - used;
+            rungs[i - 1].cash = uint128(have + add);
+            used += add;
+        }
+        fundCash += uint128(used);
+        if (used > 0) require(usdc.transferFrom(msg.sender, address(this), used), "Book: usdc transfer failed");
+        emit Refilled(used);
     }
 
     /// @notice What the fund owns in this book: (tokens, mUSDC). Escrow of holders' orders is not included.
@@ -141,26 +187,21 @@ contract OrderBook {
         return (nav * (BPS - (RUNGS - i) * STEP_BPS + RESALE_MARKUP_BPS)) / BPS;
     }
 
-    /// @notice The lowest price the ladder ever offers at: the ask of its bottom rung.
-    ///         A market at or below it means the ladder's bids are used up.
-    function floorPrice() external view returns (uint256) {
-        return _ask(_nav(), 0);
-    }
-
     /// @notice The price at which the fund issues new tokens right now: NAV +0.2%.
     function issuePrice() public view returns (uint256) {
         return (_nav() * (BPS + ISSUE_PREMIUM_BPS)) / BPS;
     }
 
     /// @notice The ladder as it stands: NAV, and per rung its bid price, its ask price,
-    ///         the tokens it offers and the cash it bids. Above it, new tokens are on
-    ///         offer at issuePrice().
+    ///         the tokens it offers and the cash it bids; `at` is the rung where bids
+    ///         and offers meet. Above the ladder, new tokens are on offer at issuePrice().
     function ladder()
         external
         view
-        returns (uint256 nav, uint256[] memory bids, uint256[] memory asks, uint256[] memory tokens, uint256[] memory cash)
+        returns (uint256 nav, uint256[] memory bids, uint256[] memory asks, uint256[] memory tokens, uint256[] memory cash, uint256 at)
     {
         nav = _nav();
+        at = edge;
         bids = new uint256[](RUNGS);
         asks = new uint256[](RUNGS);
         tokens = new uint256[](RUNGS);
@@ -174,18 +215,18 @@ contract OrderBook {
     }
 
     /// @notice The fund's own price: the middle between the ladder's best bid and
-    ///         the fund's best offer (a rung that holds tokens, otherwise new issuance).
-    ///         Holders' orders do not count, so nobody can move this number by
+    ///         the fund's best offer (a rung that holds tokens, otherwise approved new
+    ///         issuance). Holders' orders do not count, so nobody can move this number by
     ///         posting an order; it only moves when the ladder trades or NAV changes.
     function spotPrice() public view returns (uint256) {
         uint256 nav = _nav();
         if (nav == 0) return 0;
-        uint256 ask = INavSource(fund).issuanceApproved() > 0 ? (nav * (BPS + ISSUE_PREMIUM_BPS)) / BPS : 0;
+        uint256 e = edge;
+        uint256 ask;
+        if (rungs[e].tokens > 0) ask = _ask(nav, e);
+        else if (INavSource(fund).issuanceApproved() > 0) ask = (nav * (BPS + ISSUE_PREMIUM_BPS)) / BPS;
         uint256 bid;
-        for (uint256 i = 0; i < RUNGS; i++) {
-            if (rungs[i].tokens > 0) { ask = _ask(nav, i); break; }
-        }
-        for (uint256 i = RUNGS; i > 0; i--) {
+        for (uint256 i = e + 1; i > 0; i--) {
             uint256 p = _price(nav, i - 1);
             if (_bidSize(rungs[i - 1].cash, p) > 0) { bid = p; break; }
         }
@@ -199,7 +240,11 @@ contract OrderBook {
     // ------------------------------------------------------------------
 
     struct Match {
-        Rung[] rung;    // the ladder after the trade
+        Rung[] rung;    // the rungs this trade read, as they are after it
+        bool[] loaded;  // which rungs were read
+        uint256 lo;     // lowest and highest rung read (lo > hi: none)
+        uint256 hi;
+        uint256 edge;   // where bids and offers meet after the trade
         uint256[] fill; // tokens taken from each named order
         uint256 tokens; // tokens traded
         uint256 cash;   // mUSDC traded, before the taker fee
@@ -227,16 +272,33 @@ contract OrderBook {
         returns (Match memory m)
     {
         require(seeded, "Book: market not open");
-        Cursor memory c = Cursor(_nav(), buying ? 0 : RUNGS, 0, 0, 0, maxTokens, maxCash, limit, buying && seeded ? INavSource(fund).issuanceApproved() : 0);
+        uint256 e = edge;
+        Cursor memory c = Cursor(_nav(), buying ? e : e + 1, 0, 0, 0, maxTokens, maxCash, limit, buying ? INavSource(fund).issuanceApproved() : 0);
         m.rung = new Rung[](RUNGS);
-        for (uint256 n = 0; n < RUNGS; n++) m.rung[n] = rungs[n];
+        m.loaded = new bool[](RUNGS);
+        m.lo = RUNGS;
         m.fill = new uint256[](ids.length);
         while (m.tokens < maxTokens && _step(buying, m, c, ids)) {}
+
+        // the lowest rung that holds tokens now; a rung not read still holds what it held
+        uint256 i = buying || m.lo > e ? e : m.lo;
+        while (i < RUNGS && m.loaded[i] && m.rung[i].tokens == 0) i++;
+        if (i >= RUNGS) i = RUNGS - 1;
+        else if (!buying && !m.loaded[i]) i = e;
+        m.edge = i;
+    }
+
+    function _load(Match memory m, uint256 i) private view {
+        if (m.loaded[i]) return;
+        m.rung[i] = rungs[i];
+        m.loaded[i] = true;
+        if (i < m.lo) m.lo = i;
+        if (i > m.hi) m.hi = i;
     }
 
     /// @dev One fill: from the better of the next rung and the next named order.
     function _step(bool buying, Match memory m, Cursor memory c, uint256[] memory ids) private view returns (bool) {
-        (uint256 rungPrice, uint256 rungAvail) = _nextRung(buying, m.rung, c);
+        (uint256 rungPrice, uint256 rungAvail) = _nextRung(buying, m, c);
         (uint256 orderPrice, uint256 orderAvail) = _nextOrder(buying, c, ids);
         if (rungAvail == 0 && orderAvail == 0) return false;
 
@@ -280,20 +342,22 @@ contract OrderBook {
         return true;
     }
 
-    function _nextRung(bool buying, Rung[] memory r, Cursor memory c) private pure returns (uint256 price, uint256 avail) {
+    function _nextRung(bool buying, Match memory m, Cursor memory c) private view returns (uint256 price, uint256 avail) {
         if (buying) {
             for (; c.i < RUNGS; c.i++) {
-                if (r[c.i].tokens == 0) continue;
+                _load(m, c.i);
+                if (m.rung[c.i].tokens == 0) continue;
                 price = _ask(c.nav, c.i);
-                if (price > 0) return (price, r[c.i].tokens);
+                if (price > 0) return (price, m.rung[c.i].tokens);
             }
             // nothing left on the ladder: new tokens above NAV, as far as holders approved them
             price = (c.nav * (BPS + ISSUE_PREMIUM_BPS)) / BPS;
             if (price > 0 && c.issuable > 0) return (price, c.issuable);
         } else {
             for (; c.i > 0; c.i--) {
+                _load(m, c.i - 1);
                 price = _price(c.nav, c.i - 1);
-                avail = _bidSize(r[c.i - 1].cash, price);
+                avail = _bidSize(m.rung[c.i - 1].cash, price);
                 if (avail > 0) return (price, avail);
             }
         }
@@ -331,6 +395,22 @@ contract OrderBook {
         return (cash * TAKER_FEE_BPS + BPS - 1) / BPS;
     }
 
+    /// @dev Stores the rungs a trade changed and moves the fund's totals by the difference.
+    function _writeLadder(Match memory m) private {
+        uint256 tBefore; uint256 tAfter; uint256 cBefore; uint256 cAfter;
+        for (uint256 n = m.lo; n <= m.hi && n < RUNGS; n++) {
+            if (!m.loaded[n]) continue;
+            Rung storage r = rungs[n];
+            if (r.tokens == m.rung[n].tokens && r.cash == m.rung[n].cash) continue;
+            tBefore += r.tokens; cBefore += r.cash;
+            tAfter += m.rung[n].tokens; cAfter += m.rung[n].cash;
+            rungs[n] = m.rung[n];
+        }
+        fundTokens = uint128(fundTokens + tAfter - tBefore);
+        fundCash = uint128(fundCash + cAfter - cBefore);
+        if (edge != m.edge) edge = m.edge;
+    }
+
     /// @dev Writes a worked-out trade: the ladder, the makers, the taker, the fee.
     function _settle(bool buying, Match memory m, uint256[] memory ids) private returns (uint256 fee) {
         fee = _fee(m.cash);
@@ -340,15 +420,7 @@ contract OrderBook {
             require(token.transferFrom(msg.sender, address(this), m.tokens), "Book: token transfer failed");
         }
 
-        uint256 t;
-        uint256 c;
-        for (uint256 n = 0; n < RUNGS; n++) {
-            if (rungs[n].tokens != m.rung[n].tokens || rungs[n].cash != m.rung[n].cash) rungs[n] = m.rung[n];
-            t += m.rung[n].tokens;
-            c += m.rung[n].cash;
-        }
-        fundTokens = uint128(t);
-        fundCash = uint128(c);
+        _writeLadder(m);
         if (m.issued > 0) {
             require(usdc.transfer(fund, m.issueCash), "Book: usdc transfer failed");
             INavSource(fund).issue(address(this), m.issued);

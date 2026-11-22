@@ -14,7 +14,7 @@ Prototype for the Remix VM and testnets. mUSDC is play money.
 | UmbrellaFactory.sol | The umbrella. Launches sub-funds and lists them. One call, overview(i), returns addresses, NAV, market price and premium/discount. |
 | SubFund.sol | One sub-fund: primary sale, vault, NAV, fee, buyback, issuance vote, GP removal vote. |
 | FundToken.sol | The sub-fund's share token. Freely transferable ERC-20; only the sub-fund can mint. |
-| OrderBook.sol | Secondary market. Below NAV the fund's cash on a ladder of 50 bid rungs in 0.2% steps, each reselling 0.1% higher; above NAV new issuance at NAV +0.2%; plus holders' limit orders. 0.07% taker fee, paid to the fund. |
+| OrderBook.sol | Secondary market. Below NAV the fund's cash on a ladder of 250 bid rungs in 0.2% steps down to NAV -50%, each reselling 0.1% higher; above NAV new issuance at NAV +0.2%; plus holders' limit orders. 0.07% taker fee, paid to the fund. |
 | GPVesting.sol | Holds the manager's fee tokens until they vest. |
 | Deployers.sol | Two helpers that keep every contract under the 24 KB size limit (EIP-170). |
 | MockUSDC.sol | Test stablecoin with a public faucet. |
@@ -28,15 +28,15 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 |---|---|---|
 | Primary sale price | $1.00, fixed | SubFund.buy |
 | Sale cap | 9,500,000 tokens | SALE_CAP |
-| Fund-owned liquidity | $1 of sale cash for every 19 tokens sold (5.26% of the proceeds); cannot be withdrawn | closeSale |
-| Ladder | 50 bid rungs from NAV -0.2% to NAV -10% in 0.2% steps, equal cash; a rung offers what it bought 0.1% of NAV higher; prices follow NAV | OrderBook.seed, ladder |
+| Fund-owned liquidity | 5% of the sale proceeds at the close; cannot be withdrawn. Later anyone can bring it back to 5% of net assets from vault cash (tokens on the ladder count at NAV) | closeSale, topUpReserve, RESERVE_BPS |
+| Ladder | 250 bid rungs from NAV -0.2% to NAV -50% in 0.2% steps; 40% of the cash down to -10%, 30% from there to -20%, 20% to -40%, 10% to -50%; a rung offers what it bought 0.1% of NAV higher; prices follow NAV | OrderBook.seed, _weight, ladder |
 | New issuance | only the amount holders approved by vote (GP proposes, more than 50% of eligible supply says yes); sold only in the order book, to anyone, at NAV +0.2% once nothing cheaper is on offer; payment goes to the vault | proposeIssuance, voteIssuance, executeIssuance, OrderBook.issuePrice |
 | Taker fee | 0.07% of the mUSDC traded, paid to the fund's vault; resting orders pay nothing | TAKER_FEE_BPS |
 | Total supply at launch | 9,500,000 if sold out | initialSupply |
 | Management fee | 2% of initial supply per year, paid in new tokens (190,000) | mintManagementFee |
 | Fee lifetime cap | 10 tranches (1,900,000 tokens), then never again | FEE_YEARS_CAP |
 | Fee lock-up | each tranche unlocks one year after minting | GPVesting |
-| Buyback trigger | market price at the bottom of the ladder, 9.9% below NAV | buyback |
+| Buyback trigger | market price 10% or more below NAV | BUYBACK_TRIGGER_BPS, buyback |
 | Buyback size | at most 1% of vault cash per execution, one per week, anyone can trigger | buyback |
 | GP removal | more than 50% of eligible supply votes yes; unvested fee tokens are burned | executeRemoveGP |
 | Eligible supply | total supply minus unvested fee tokens, the fund's own tokens on the ladder and the GP's wallet | eligibleSupply |
@@ -52,8 +52,8 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 
 Market price and NAV are two separate numbers, but the fund keeps them close:
 above NAV it issues new tokens at NAV +0.2% in the amount holders approved,
-so the market cannot run away upwards while approved tokens last; below NAV its ladder bids down to NAV -10%. Beyond the ladder only
-holders' orders trade, and the buyback rule leans against the discount.
+so the market cannot run away upwards while approved tokens last; below NAV its ladder bids down to NAV -50%, and from NAV -10% the buyback
+rule leans against the discount as well. Below the ladder only holders' orders trade.
 
 ## The order book
 
@@ -61,10 +61,24 @@ The fund is its own market maker.
 
     NAV +0.2%          new tokens, as many as holders approved, money to the vault
     NAV                (nothing: the fund never trades at NAV itself)
-    NAV -0.2% ... -10% 50 bids, one fiftieth of the cash on each
+    NAV -0.2% ... -10% 50 bids, 40% of the cash (0.8% on each)
+    ... -20%           50 bids, 30% (0.6% on each)
+    ... -40%           100 bids, 20% (0.2% on each)
+    ... -50%           50 bids, 10% (0.2% on each)
 
 - Rung prices are computed from navPerToken() at the moment of a trade. When
   NAV changes, the whole ladder and the issue price move; nobody re-quotes.
+- The split of the cash over the four zones is one function, _weight, and a
+  first setting: there is no trading data yet to calibrate it. Changing it
+  means a new deployment.
+- A trade reads and writes only the rungs it touches. The book remembers the
+  rung where the market stands (edge), so a small order costs the same gas
+  with 250 rungs as with 50 (about 186,000 for a market buy in the tests).
+  ladder() returns all 250 rungs for the dashboard and is a view call.
+- topUpReserve() places vault cash on the bids from the market downwards,
+  each rung up to its share of the target, until the fund's liquidity is 5%
+  of net assets again. Anyone can call it; it does nothing when the reserve
+  is at its target.
 - A rung that bought tokens offers them again 0.1% of NAV above its bid. A
   round trip therefore leaves the fund 0.1% plus the fee twice, and the profit
   stays on the rung as more cash to bid with.
@@ -86,7 +100,9 @@ The fund is its own market maker.
 Compared with the constant-product pool this replaces: an order of 1% of the
 fund moved the pool price by about 19%. Now a buy costs NAV +0.2% as long as
 approved tokens last,
-and a sale of 1% of the fund goes through about ten rungs, 2% below NAV.
+and a sale of 1% of the fund goes through 25 rungs and ends 5% below NAV
+(average price 2.6% below NAV) with the reserve at its 5% start; a sale of 2.6% of
+the fund ends 13% below NAV.
 
 ## Run the demo
 
@@ -131,8 +147,12 @@ the order book before trading.
 - There is no matching engine. Two resting orders that cross are not matched
   until a taker trades against them, and a taker who names no orders trades
   with the ladder only.
-- The buyback buys at the bottom of the ladder. A sale into the book right
-  before buyback() can profit from it (MEV); the 1% cap bounds the damage.
+- The reserve is 5% of the fund spread over 50% of price. It slows a fall and
+  earns on every bounce; it cannot hold a price against sellers of more than
+  about 5% of the fund.
+- The buyback buys the cheapest offers once the market is 10% below NAV. A
+  sale into the book right before buyback() can profit from it (MEV); the 1%
+  cap bounds the damage.
 - The GP cannot vote from his own wallet, but nothing stops him from moving
   vested tokens to another wallet first.
 - No whitelist and no identity checks. That is deliberate for a prototype that

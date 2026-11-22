@@ -21,7 +21,7 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
   const [gp, alice, bob, carol, dave, eve] = accts
   const bookAddr = await book.getAddress(), fundAddr = await fund.getAddress()
 
-  const lad = async () => { const [l, issue, issuable] = await Promise.all([book.ladder(), book.issuePrice(), fund.issuanceApproved()]); return { issuable, nav: l[0], prices: [...l[1]], asks: [...l[2]], tokens: [...l[3]], cash: [...l[4]], issue } }
+  const lad = async () => { const [l, issue, issuable] = await Promise.all([book.ladder(), book.issuePrice(), fund.issuanceApproved()]); return { issuable, nav: l[0], prices: [...l[1]], asks: [...l[2]], tokens: [...l[3]], cash: [...l[4]], edge: Number(l[5]), issue } }
   const open = async () => { const o = await book.openOrders(); return o[0].map((id, k) => ({ id, maker: o[1][k], isBuy: o[2][k], price: o[3][k], tokens: o[4][k] })) }
   // Every unit in the book is either the fund's ladder or a holder's escrow.
   const invariant = async (label) => {
@@ -43,18 +43,21 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
 
   await openMarket(w, 1000000)
   await fails(fund.closeSale(), 'Fund: sale closed')
-  const seed = U(1000000) / 19n
+  const seed = U(1000000) / 20n // 5% of the sale cash
   {
     const l = await lad()
     assert.strictEqual(l.nav, U6, 'NAV 1.00 after close')
-    assert.strictEqual(l.prices.length, 50)
-    const per = seed / 50n
-    for (let k = 0; k < 50; k++) {
-      assert.strictEqual(l.prices[k], (U6 * BigInt(10000 - (50 - k) * 20)) / 10000n) // bids 0.9000 … 0.9980
-      assert.strictEqual(l.asks[k], l.prices[k] + 1000n)                              // each resells 0.1% of NAV higher
+    assert.strictEqual(l.prices.length, 250); assert.strictEqual(l.edge, 249)
+    let zone = [0n, 0n, 0n, 0n]
+    for (let k = 0; k < 250; k++) {
+      assert.strictEqual(l.prices[k], (U6 * BigInt(10000 - (250 - k) * 20)) / 10000n) // bids 0.5000 … 0.9980
+      assert.strictEqual(l.asks[k], l.prices[k] + 1000n)                               // each resells 0.1% of NAV higher
       assert.strictEqual(l.tokens[k], 0n)
-      assert.strictEqual(l.cash[k], k === 49 ? per + (seed - per * 50n) : per)
+      const depth = 250 - k
+      assert.strictEqual(l.cash[k], (seed * (depth <= 50 ? 8n : depth <= 100 ? 6n : 2n)) / 1000n)
+      zone[depth <= 50 ? 0 : depth <= 100 ? 1 : depth <= 200 ? 2 : 3] += l.cash[k]
     }
+    assert.deepStrictEqual(zone.map((z) => Number((z * 100n) / seed)), [40, 30, 20, 10]) // to -10%, -20%, -40%, -50%
     assert.strictEqual(l.issue, 1002000n)
     assert.strictEqual(await book.spotPrice(), 998000n, 'nothing on offer yet: the market is the top bid')
     assert.strictEqual(await token.totalSupply(), U(1000000), 'no tokens set aside for the book')
@@ -62,7 +65,7 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     assert.strictEqual(M.bookSpot(l), 998000n)
   }
   await invariant('seed')
-  ok('ladder seeded: 50 bids from NAV -0.2% to NAV -10% in 0.2% steps, equal cash, each reselling 0.1% higher; NAV 1.0000')
+  ok('ladder seeded with 5% of the sale cash: 250 bids from NAV -0.2% to NAV -50% in 0.2% steps, each reselling 0.1% higher; 40/30/20/10% of the cash down to -10/-20/-40/-50%')
 
   // ---------- new tokens only after a holder vote, only through the book ----------
   {
@@ -117,18 +120,18 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     ok('market buy of 10,000 mUSDC: ' + f6(sim.tokens) + ' new tokens issued at 1.0020 (the old pool: +19%); all of it into the vault; NAV ' + f6(nav0) + ' -> ' + f6(nav1) + '; preview = contract')
 
     // selling: the ladder bids from NAV -0.5% down, and offers again at the same price what it bought
-    const l2 = await lad(), sims = M.bookSell(U(1000), l2, [])
-    assert.strictEqual(sims.last, l2.prices[49])
-    await send(book.connect(alice).sell(U(1000), sims.cash - sims.fee, []))
-    const l3 = await lad(), cash0 = l3.cash[49] + (U(1000) * l3.prices[49]) / U6
-    assert.strictEqual(l3.tokens[49], U(1000))
+    const l2 = await lad(), sims = M.bookSell(U(300), l2, [])
+    assert.strictEqual(sims.last, l2.prices[249])
+    await send(book.connect(alice).sell(U(300), sims.cash - sims.fee, []))
+    const l3 = await lad(), cash0 = l3.cash[249] + (U(300) * l3.prices[249]) / U6
+    assert.strictEqual(l3.tokens[249], U(300)); assert.strictEqual(l3.edge, 249)
     const simb = M.bookBuy(U(2000), l3, [])
-    assert.strictEqual(simb.ladder.tokens[49], 0n); assert.strictEqual(simb.last, l3.issue)
+    assert.strictEqual(simb.ladder.tokens[249], 0n); assert.strictEqual(simb.last, l3.issue)
     await send(book.connect(bob).buy(U(2000), simb.tokens, []))
-    const l4 = await lad(), profit = l4.cash[49] - cash0
-    assert(profit >= (U(1000) * l3.nav * 10n) / 10000n / U6 - 1000n && profit <= U(1) + 2000n, 'round trip leaves 0.1% of NAV on the rung: ' + profit)
+    const l4 = await lad(), profit = l4.cash[249] - cash0
+    assert(profit >= (U(300) * l3.nav * 10n) / 10000n / U6 - 1000n && profit <= U(1) + 2000n, 'round trip leaves 0.1% of NAV on the rung: ' + profit)
     await invariant('sell and buy back')
-    ok('selling 1,000 fills the top bid at ' + f6(sims.last) + '; the next buyer takes those tokens at ' + f6(l3.asks[49]) + ' before anything new is issued: ' + f6(profit) + ' mUSDC profit stays on the rung')
+    ok('selling 300 fills the top bid at ' + f6(sims.last) + '; the next buyer takes those tokens at ' + f6(l3.asks[249]) + ' before anything new is issued: ' + f6(profit) + ' mUSDC profit stays on the rung')
   }
 
   // ---------- slippage, deep sells ----------
@@ -143,7 +146,17 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     const prem = Number(await fund.premiumBps())
     assert(prem >= 0 && prem <= 20, 'market stays within 0.2% above NAV: ' + prem)
     await invariant('big issue')
-    ok('a buy of 4,000,000 mUSDC is issued at NAV +0.2% in full: the market cannot run away above NAV (premium now ' + (prem / 100).toFixed(2) + '%)')
+    // the fund is now five times as large: anyone can bring the ladder back to 5% of net assets from the vault
+    const na = await fund.netAssets(), inv0 = await book.inventory(), vc0 = await fund.vaultCash()
+    await send(fund.connect(dave).topUpReserve())
+    const inv1 = await book.inventory(), lt = await lad()
+    assert.strictEqual(await fund.netAssets(), na, 'moving cash from the vault to the ladder changes no value')
+    assert.strictEqual(vc0 - await fund.vaultCash(), inv1[1] - inv0[1])
+    assert(inv1[1] <= (na * 500n) / 10000n && inv1[1] > (na * 499n) / 10000n, 'ladder cash at 5% of net assets: ' + inv1[1])
+    assert.strictEqual(lt.cash[249], (((na * 500n) / 10000n) * 8n) / 1000n)
+    await fails(fund.connect(dave).topUpReserve(), 'Fund: reserve at target')
+    await invariant('top-up')
+    ok('a buy of 4,000,000 mUSDC is issued at NAV +0.2% in full: the market cannot run away above NAV (premium now ' + (prem / 100).toFixed(2) + '%); the reserve is then topped up from ' + f6(inv0[1]) + ' to ' + f6(inv1[1]) + ' mUSDC, 5% of net assets')
   }
 
   // ---------- limit orders ----------
@@ -224,7 +237,7 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     const nav = await fund.navPerToken()
     assert.strictEqual(nav, 1200000n)
     const l = await lad()
-    assert.strictEqual(l.prices[49], 1197600n); assert.strictEqual(l.asks[49], 1198800n); assert.strictEqual(l.issue, 1202400n)
+    assert.strictEqual(l.prices[249], 1197600n); assert.strictEqual(l.asks[249], 1198800n); assert.strictEqual(l.issue, 1202400n)
     assert.strictEqual(await fund.marketPrice(), 1200000n)
     assert.strictEqual((await open())[0].price, 1050000n)
     // Bob's stale ask at 1.05 is now below the ladder's bids: a taker buys it first
@@ -243,10 +256,10 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     const l = await lad(), all = M.bookSell(U(300000), l, [])
     await send(book.connect(bob).sell(U(300000), 0, []))
     assert.strictEqual(await token.balanceOf(bob.address), U(300000) - all.tokens)
-    assert((await book.inventory())[1] < 100n, 'ladder cash used up (dust only)')
+    assert((await book.inventory())[1] < 500n, 'ladder cash used up (dust only)')
     const nav = await fund.navPerToken()
-    assert.strictEqual(await fund.marketPrice(), (nav * 9010n) / 10000n, 'bottom rung offers at NAV -9.9%')
-    assert.strictEqual(await fund.marketPrice(), await fund.buybackTriggerPrice())
+    assert.strictEqual(await fund.marketPrice(), (nav * 5010n) / 10000n, 'bottom rung offers at NAV -49.9%')
+    assert.strictEqual(await fund.buybackTriggerPrice(), (nav * 9000n) / 10000n)
     await fails(book.connect(bob).sell(U(100), 0, []), 'Book: nothing to sell into')
     const max = await fund.maxBuyback()
     await fails(fund.connect(carol).buyback(max + 1n, []), 'Fund: amount above limit')
@@ -258,7 +271,7 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     assert(l2.cash[0] > 0n, 'vault cash now bids on the lowest rung')
     await fails(fund.connect(carol).buyback(U(10), []), 'Fund: buyback cooldown')
     await invariant('buyback')
-    ok('selling through all fifty bids pins the market at the bottom of the ladder (NAV -9.9%) = buyback trigger; buyback burns ' + f6(ts0 - ts1) + ' tokens and refills the lowest rung; NAV per token ' + f6(navB) + ' -> ' + f6(navA))
+    ok('selling through all 250 bids ends at the bottom of the ladder (NAV -49.9%); the buyback is open from NAV -10% down; buyback burns ' + f6(ts0 - ts1) + ' tokens and refills the lowest rung; NAV per token ' + f6(navB) + ' -> ' + f6(navA))
   }
 
   // ---------- trading account with a session key ----------

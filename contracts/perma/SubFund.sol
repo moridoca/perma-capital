@@ -18,16 +18,17 @@ interface IComponentDeployer {
 ///
 ///         What the code enforces (no manager discretion):
 ///           - primary sale at a fixed $1.00, hard-capped
-///           - sale cash worth 1/19 of the tokens sold as permanent, fund-owned
-///             liquidity: bids in the order book in equal steps of 0.2% below NAV,
-///             each reselling what it bought 0.1% higher
+///           - 5% of the sale cash as permanent, fund-owned liquidity: bids in
+///             the order book in equal steps of 0.2% from NAV down to NAV -50%,
+///             each reselling what it bought 0.1% higher; anyone can make the
+///             fund top this reserve up to 5% of net assets from the vault
 ///           - new tokens only in the amount token holders have approved by
 ///             vote, only through the open order book, and only at NAV +0.2%:
 ///             the money goes into the vault and never dilutes holders
 ///           - management fee paid in tokens: 2% of initial supply per year,
 ///             10-year lifetime cap, each tranche locked for one year
 ///           - buyback-and-burn that anyone can trigger when the market
-///             has fallen to the bottom of the fund's ladder, 9.9% below NAV
+///             trades 10% or more below NAV
 ///           - token holders can replace the GP; unvested fee tokens are burned
 ///
 ///         What stays a trust assumption: the value of off-chain
@@ -42,13 +43,14 @@ contract SubFund {
     // --- primary sale ---
     uint256 public constant IPO_PRICE = 1e6;          // $1.00 per token
     uint256 public constant SALE_CAP = 9_500_000e6;   // tokens sold to investors
-    uint256 public constant POL_DIVISOR = 19;         // liquidity seed = sale cash for sold / 19 tokens
+    uint256 public constant RESERVE_BPS = 500;        // fund-owned liquidity in the book: 5% of the sale cash, later 5% of net assets
 
     // --- management fee (in tokens, no NAV input needed) ---
     uint256 public constant FEE_BPS_PER_YEAR = 200;   // 2% of initial supply per year
     uint256 public constant FEE_YEARS_CAP = 10;       // fee minting stops for good after 10 tranches
 
     // --- discount control ---
+    uint256 public constant BUYBACK_TRIGGER_BPS = 1000; // market price 10% or more below NAV
     uint256 public constant BUYBACK_MAX_BPS = 100;      // at most 1% of vault cash per execution
 
     // --- governance ---
@@ -103,6 +105,7 @@ contract SubFund {
     event Purchased(address indexed investor, uint256 tokens);
     event SaleClosed(uint256 sold, uint256 liquidityTokens, uint256 liquidityUSDC);
     event TokensIssued(uint256 tokens, uint256 stillApproved);
+    event ReserveToppedUp(uint256 usdc, uint256 target);
     event CapitalDeployed(address indexed to, uint256 amount, string memo);
     event ProceedsReturned(address indexed from, uint256 amount, uint256 newInvestedValue);
     event InvestmentsMarked(uint256 oldValue, uint256 newValue, string memo);
@@ -165,14 +168,14 @@ contract SubFund {
     ///         The GP can close any time; anyone can close once sold out.
     function closeSale() external {
         require(!saleClosed, "Fund: sale closed");
-        require(sold >= POL_DIVISOR * ONE, "Fund: nothing sold");
+        require(sold >= 100 * ONE, "Fund: nothing sold");
         require(msg.sender == gp || sold == SALE_CAP, "Fund: only GP before sell-out");
         saleClosed = true;
 
         // Permanent fund-owned liquidity: cash on the book's bid ladder below
         // NAV. The fund has no function to withdraw it again. No tokens are
         // set aside: above NAV the book issues new ones.
-        uint256 liqUSDC = ((sold / POL_DIVISOR) * IPO_PRICE) / ONE;
+        uint256 liqUSDC = (((sold * RESERVE_BPS) / 10_000) * IPO_PRICE) / ONE;
         usdc.approve(address(book), liqUSDC);
         book.seed(liqUSDC);
 
@@ -284,9 +287,8 @@ contract SubFund {
     // 4. Discount control: rule-based buyback-and-burn
     // ==================================================================
 
-    /// @notice The bottom of the ladder: the lowest price it ever offers at.
     function buybackTriggerPrice() public view returns (uint256) {
-        return book.floorPrice();
+        return (navPerToken() * (10_000 - BUYBACK_TRIGGER_BPS)) / 10_000;
     }
 
     function maxBuyback() public view returns (uint256) {
@@ -294,13 +296,12 @@ contract SubFund {
     }
 
     /// @notice Anyone can make the fund buy its own tokens in the book and
-    ///         burn them once the market has fallen to the bottom of the ladder,
-    ///         9.9% below NAV: its bids are used up. Limited to 1%
+    ///         burn them while the market trades 10% or more below NAV. Limited to 1%
     ///         of vault cash per execution and one execution per "week".
     ///         Buying below NAV never lowers NAV per token.
     ///         Bought from holders' sell orders, this is a buyback at a
     ///         discount. Bought from the ladder, it turns treasury tokens into
-    ///         fresh bids: vault cash moves onto the lowest rung.
+    ///         fresh bids: vault cash moves onto the rungs where the market stands.
     /// @param ids Resting sell orders to buy from, cheapest first (may be empty).
     function buyback(uint256 usdcAmount, uint256[] calldata ids) external {
         require(saleClosed, "Fund: sale open");
@@ -318,6 +319,24 @@ contract SubFund {
         require(marketPrice() <= navBefore, "Fund: would push price above NAV");
         emit BuybackExecuted(msg.sender, spent, bought, marketPrice());
         _emitNAV();
+    }
+
+    /// @notice Anyone can make the fund bring its liquidity in the book back to
+    ///         5% of net assets with vault cash, for example after new tokens
+    ///         were issued. Tokens the ladder holds count at NAV. The cash goes
+    ///         onto the bid rungs from the market downwards.
+    function topUpReserve() external returns (uint256 used) {
+        require(saleClosed, "Fund: sale open");
+        uint256 target = (netAssets() * RESERVE_BPS) / 10_000;
+        (uint256 bookTokens, uint256 bookCash) = ownedLiquidity();
+        uint256 have = bookCash + (bookTokens * navPerToken()) / ONE;
+        require(have < target, "Fund: reserve at target");
+        uint256 amount = target - have;
+        if (amount > vaultCash()) amount = vaultCash();
+        usdc.approve(address(book), amount);
+        used = book.refill(amount, target, 250);
+        usdc.approve(address(book), 0);
+        emit ReserveToppedUp(used, target);
     }
 
     // ==================================================================
