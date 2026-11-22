@@ -8,7 +8,7 @@ import "./ERC20.sol";
 ///         Only the sub-fund contract can mint, and the sub-fund's code
 ///         only mints in four rule-bound situations:
 ///         primary sale (capped), liquidity seed (once),
-///         management fee (2% p.a., lifetime cap), follow-on (at or above NAV).
+///         management fee (2% p.a., lifetime cap), issuance approved by holders (above NAV).
 ///         Supply policy is therefore code, not a manager decision.
 contract FundToken is ERC20 {
     address public immutable fund;

@@ -2,47 +2,55 @@
 pragma solidity ^0.8.20;
 
 import "./FundToken.sol";
-import "./LiquidityPool.sol";
+import "./OrderBook.sol";
 import "./GPVesting.sol";
 
 interface IComponentDeployer {
     function deploy(string calldata name, string calldata symbol, address usdc, uint256 yearSeconds)
         external
-        returns (address token, address pool, address vesting);
+        returns (address token, address book, address vesting);
 }
 
 /// @title SubFund - one permanent-capital sub-fund under the umbrella
 /// @notice Issued once, never wound up. There are no capital calls, no
 ///         redemptions and no distributions: profits stay in the fund and
-///         raise NAV per token. Holders exit by selling in the pool.
+///         raise NAV per token. Holders exit by selling in the order book.
 ///
 ///         What the code enforces (no manager discretion):
 ///           - primary sale at a fixed $1.00, hard-capped
-///           - 5% of supply paired with sale cash as permanent, fund-owned liquidity
+///           - 5% of the sale cash as permanent, fund-owned liquidity: bids in
+///             the order book in equal steps of 0.2% from NAV down to NAV -50%,
+///             each reselling what it bought 0.1% higher; anyone can make the
+///             fund top this reserve up to 5% of net assets from the vault
+///           - new tokens only in the amount token holders have approved by
+///             vote, only through the open order book, and only at NAV +0.2%:
+///             the money goes into the vault and never dilutes holders
 ///           - management fee paid in tokens: 2% of initial supply per year,
 ///             10-year lifetime cap, each tranche locked for one year
 ///           - buyback-and-burn that anyone can trigger when the market
-///             trades more than 10% below NAV
-///           - follow-on issuance only at or above NAV, so new money never dilutes holders
+///             trades 10% or more below NAV
 ///           - token holders can replace the GP; unvested fee tokens are burned
 ///
 ///         What stays a trust assumption: the value of off-chain
 ///         investments is reported by the GP (investedValue).
-///         Cash and pool liquidity are read on-chain and cannot be misstated.
+///         Cash and the fund's liquidity in the book are read on-chain and
+///         cannot be misstated. Because the ladder is quoted around NAV, a
+///         wrong valuation moves the fund's own bids and asks: the most it
+///         can cost is the liquidity in the book, 5% of the fund.
 contract SubFund {
     uint256 private constant ONE = 1e6; // 1 token and $1.00, both 6 decimals
 
     // --- primary sale ---
     uint256 public constant IPO_PRICE = 1e6;          // $1.00 per token
     uint256 public constant SALE_CAP = 9_500_000e6;   // tokens sold to investors
-    uint256 public constant POL_DIVISOR = 19;         // liquidity seed = sold / 19  (= 5% of total supply)
+    uint256 public constant RESERVE_BPS = 500;        // fund-owned liquidity in the book: 5% of the sale cash, later 5% of net assets
 
     // --- management fee (in tokens, no NAV input needed) ---
     uint256 public constant FEE_BPS_PER_YEAR = 200;   // 2% of initial supply per year
     uint256 public constant FEE_YEARS_CAP = 10;       // fee minting stops for good after 10 tranches
 
     // --- discount control ---
-    uint256 public constant BUYBACK_TRIGGER_BPS = 1000; // market price more than 10% below NAV
+    uint256 public constant BUYBACK_TRIGGER_BPS = 1000; // market price 10% or more below NAV
     uint256 public constant BUYBACK_MAX_BPS = 100;      // at most 1% of vault cash per execution
 
     // --- governance ---
@@ -51,7 +59,7 @@ contract SubFund {
     string public name;
     IERC20Like public immutable usdc;
     FundToken public immutable token;
-    LiquidityPool public immutable pool;
+    OrderBook public immutable book;
     GPVesting public immutable vesting;
 
     /// @notice Length of one "year" in seconds. 365 days in production;
@@ -79,8 +87,13 @@ contract SubFund {
     // buyback state
     uint256 public lastBuyback;
 
-    // follow-on state
-    uint256 public followOnRemaining;
+    // issuance state: what holders have approved and the book has not sold yet
+    uint256 public issuanceApproved;
+    uint256 public issueProposalId;
+    uint256 public issueProposed;   // tokens asked for in the running vote
+    uint256 public issueDeadline;
+    uint256 public issueYes;
+    mapping(uint256 => mapping(address => uint256)) public issueEscrow;
 
     // governance state
     uint256 public proposalId;
@@ -91,14 +104,17 @@ contract SubFund {
 
     event Purchased(address indexed investor, uint256 tokens);
     event SaleClosed(uint256 sold, uint256 liquidityTokens, uint256 liquidityUSDC);
+    event TokensIssued(uint256 tokens, uint256 stillApproved);
+    event ReserveToppedUp(uint256 usdc, uint256 target);
     event CapitalDeployed(address indexed to, uint256 amount, string memo);
     event ProceedsReturned(address indexed from, uint256 amount, uint256 newInvestedValue);
     event InvestmentsMarked(uint256 oldValue, uint256 newValue, string memo);
     event NAVUpdated(uint256 navPerToken, uint256 marketPrice, uint256 timestamp);
     event ManagementFeeMinted(uint256 tranche, uint256 tokens);
     event BuybackExecuted(address indexed caller, uint256 usdcSpent, uint256 tokensBurned, uint256 priceAfter);
-    event FollowOnOpened(uint256 tokens);
-    event FollowOnSubscribed(address indexed investor, uint256 tokens, uint256 price);
+    event IssuanceProposed(uint256 indexed id, uint256 tokens, uint256 deadline);
+    event IssuanceVoted(uint256 indexed id, address indexed voter, uint256 tokens);
+    event IssuanceApproved(uint256 indexed id, uint256 tokens, uint256 approvedNow);
     event RemovalProposed(uint256 indexed id, address indexed proposer, address newGP, uint256 deadline);
     event Voted(uint256 indexed id, address indexed voter, uint256 tokens);
     event GPRemoved(uint256 indexed id, address oldGP, address newGP, uint256 burnedUnvested);
@@ -108,7 +124,7 @@ contract SubFund {
         _;
     }
 
-    /// @param components Helper that deploys token, pool and vesting for this
+    /// @param components Helper that deploys token, order book and vesting for this
     ///        fund. Keeping that bytecode out of this contract is what keeps
     ///        every contract below the 24 KB size limit (EIP-170).
     constructor(
@@ -126,10 +142,10 @@ contract SubFund {
         gp = gp_;
         YEAR = yearSeconds;
         VOTING_PERIOD = votingSeconds;
-        (address t, address p, address v) =
+        (address t, address b, address v) =
             IComponentDeployer(components).deploy(name_, symbol_, usdc_, yearSeconds);
         token = FundToken(t);
-        pool = LiquidityPool(p);
+        book = OrderBook(b);
         vesting = GPVesting(v);
     }
 
@@ -152,22 +168,20 @@ contract SubFund {
     ///         The GP can close any time; anyone can close once sold out.
     function closeSale() external {
         require(!saleClosed, "Fund: sale closed");
-        require(sold >= POL_DIVISOR * ONE, "Fund: nothing sold");
+        require(sold >= 100 * ONE, "Fund: nothing sold");
         require(msg.sender == gp || sold == SALE_CAP, "Fund: only GP before sell-out");
         saleClosed = true;
 
-        // Permanent fund-owned liquidity: equal token and cash value at $1.00.
-        // The fund has no function to withdraw it again.
-        uint256 liqTokens = sold / POL_DIVISOR;
-        uint256 liqUSDC = (liqTokens * IPO_PRICE) / ONE;
-        token.mint(address(this), liqTokens);
-        token.approve(address(pool), liqTokens);
-        usdc.approve(address(pool), liqUSDC);
-        pool.addLiquidity(liqTokens, liqUSDC);
+        // Permanent fund-owned liquidity: cash on the book's bid ladder below
+        // NAV. The fund has no function to withdraw it again. No tokens are
+        // set aside: above NAV the book issues new ones.
+        uint256 liqUSDC = (((sold * RESERVE_BPS) / 10_000) * IPO_PRICE) / ONE;
+        usdc.approve(address(book), liqUSDC);
+        book.seed(liqUSDC);
 
-        initialSupply = sold + liqTokens;
+        initialSupply = sold;
         lastFeeMint = block.timestamp;
-        emit SaleClosed(sold, liqTokens, liqUSDC);
+        emit SaleClosed(sold, 0, liqUSDC);
         _emitNAV();
     }
 
@@ -206,26 +220,22 @@ contract SubFund {
         return usdc.balanceOf(address(this));
     }
 
-    /// @notice The fund's share of the pool: (tokens, mUSDC).
+    /// @notice What the fund owns on the book's ladder: (tokens, mUSDC).
     function ownedLiquidity() public view returns (uint256 tokens, uint256 cash) {
-        uint256 total = pool.totalShares();
-        if (total == 0) return (0, 0);
-        uint256 mine = pool.shares(address(this));
-        tokens = (pool.reserveToken() * mine) / total;
-        cash = (pool.reserveUSDC() * mine) / total;
+        return book.inventory();
     }
 
-    /// @notice Net assets = vault cash + fund-owned pool cash + reported investments.
+    /// @notice Net assets = vault cash + the fund's cash in the book + reported investments.
     function netAssets() public view returns (uint256) {
-        (, uint256 poolCash) = ownedLiquidity();
-        return vaultCash() + poolCash + investedValue;
+        (, uint256 bookCash) = ownedLiquidity();
+        return vaultCash() + bookCash + investedValue;
     }
 
-    /// @notice Tokens held by investors and the GP. Fund-owned tokens in the
-    ///         pool are treasury stock and do not count.
+    /// @notice Tokens held by investors and the GP. The fund's own tokens on
+    ///         the ladder are treasury stock and do not count.
     function outstandingSupply() public view returns (uint256) {
-        (uint256 poolTokens, ) = ownedLiquidity();
-        return token.totalSupply() - poolTokens;
+        (uint256 bookTokens, ) = ownedLiquidity();
+        return token.totalSupply() - bookTokens;
     }
 
     /// @notice NAV per token in mUSDC, 6 decimals (1_000000 = $1.00).
@@ -235,9 +245,10 @@ contract SubFund {
         return (netAssets() * ONE) / supply;
     }
 
-    /// @notice Pool price in mUSDC per token, 6 decimals.
+    /// @notice The ladder's price in mUSDC per token, 6 decimals: the middle
+    ///         between its best bid and best ask.
     function marketPrice() public view returns (uint256) {
-        return pool.spotPrice();
+        return book.spotPrice();
     }
 
     /// @notice Market price relative to NAV in basis points.
@@ -284,58 +295,113 @@ contract SubFund {
         return (vaultCash() * BUYBACK_MAX_BPS) / 10_000;
     }
 
-    /// @notice Anyone can make the fund buy its own tokens in the pool and
-    ///         burn them while the market trades more than 10% below NAV.
-    ///         Limited to 1% of vault cash per execution and one execution
-    ///         per "week". Buying below NAV never lowers NAV per token.
-    ///         Note: where the fund itself owns the pool, a holder selling
-    ///         into the pool already is a buyback at the market price. This
-    ///         function then moves vault cash into the pool and lifts the quote.
-    function buyback(uint256 usdcAmount) external {
+    /// @notice Anyone can make the fund buy its own tokens in the book and
+    ///         burn them while the market trades 10% or more below NAV. Limited to 1%
+    ///         of vault cash per execution and one execution per "week".
+    ///         Buying below NAV never lowers NAV per token.
+    ///         Bought from holders' sell orders, this is a buyback at a
+    ///         discount. Bought from the ladder, it turns treasury tokens into
+    ///         fresh bids: vault cash moves onto the rungs where the market stands.
+    /// @param ids Resting sell orders to buy from, cheapest first (may be empty).
+    function buyback(uint256 usdcAmount, uint256[] calldata ids) external {
         require(saleClosed, "Fund: sale open");
         require(block.timestamp >= lastBuyback + YEAR / 52, "Fund: buyback cooldown");
         uint256 navBefore = navPerToken();
-        require(marketPrice() < buybackTriggerPrice(), "Fund: discount below trigger");
+        require(marketPrice() <= buybackTriggerPrice(), "Fund: discount below trigger");
         require(usdcAmount > 0 && usdcAmount <= maxBuyback(), "Fund: amount above limit");
         lastBuyback = block.timestamp;
 
-        usdc.approve(address(pool), usdcAmount);
-        uint256 bought = pool.swapUSDCForToken(usdcAmount, 0);
+        usdc.approve(address(book), usdcAmount);
+        (uint256 bought, uint256 spent) = book.buy(usdcAmount, 0, ids);
+        usdc.approve(address(book), 0);
         token.burn(bought);
 
         require(marketPrice() <= navBefore, "Fund: would push price above NAV");
-        emit BuybackExecuted(msg.sender, usdcAmount, bought, marketPrice());
+        emit BuybackExecuted(msg.sender, spent, bought, marketPrice());
         _emitNAV();
     }
 
-    // ==================================================================
-    // 5. Follow-on issuance: only at or above NAV
-    // ==================================================================
-
-    /// @notice GP offers additional tokens. The price is not his choice.
-    function openFollowOn(uint256 tokenAmount) external onlyGP {
+    /// @notice Anyone can make the fund bring its liquidity in the book back to
+    ///         5% of net assets with vault cash, for example after new tokens
+    ///         were issued. Tokens the ladder holds count at NAV. The cash goes
+    ///         onto the bid rungs from the market downwards.
+    function topUpReserve() external returns (uint256 used) {
         require(saleClosed, "Fund: sale open");
-        followOnRemaining = tokenAmount;
-        emit FollowOnOpened(tokenAmount);
+        uint256 target = (netAssets() * RESERVE_BPS) / 10_000;
+        (uint256 bookTokens, uint256 bookCash) = ownedLiquidity();
+        uint256 have = bookCash + (bookTokens * navPerToken()) / ONE;
+        require(have < target, "Fund: reserve at target");
+        uint256 amount = target - have;
+        if (amount > vaultCash()) amount = vaultCash();
+        usdc.approve(address(book), amount);
+        used = book.refill(amount, target, 250);
+        usdc.approve(address(book), 0);
+        emit ReserveToppedUp(used, target);
     }
 
-    /// @notice Issue price = the higher of NAV and market price.
-    ///         New money never buys in below the value existing holders own.
-    function issuePrice() public view returns (uint256) {
-        uint256 nav = navPerToken();
-        uint256 price = marketPrice();
-        return price > nav ? price : nav;
+    // ==================================================================
+    // 5. Issuance: only what holders approved, only in the open market,
+    //    only above NAV
+    // ==================================================================
+
+    function issuanceVoteActive() public view returns (bool) {
+        return issueProposed > 0 && block.timestamp <= issueDeadline;
     }
 
-    function subscribe(uint256 tokenAmount, uint256 maxPrice) external {
-        require(tokenAmount > 0 && tokenAmount <= followOnRemaining, "Fund: exceeds follow-on");
-        uint256 price = issuePrice();
-        require(price <= maxPrice, "Fund: price above max");
-        followOnRemaining -= tokenAmount;
-        uint256 cost = (tokenAmount * price + ONE - 1) / ONE; // round up in favour of the fund
-        require(usdc.transferFrom(msg.sender, address(this), cost), "Fund: payment failed");
-        token.mint(msg.sender, tokenAmount);
-        emit FollowOnSubscribed(msg.sender, tokenAmount, price);
+    /// @notice The GP asks holders to approve the issue of up to `tokenAmount`
+    ///         new tokens. He does not set a price and names no buyer: approved
+    ///         tokens are offered to everyone in the order book at NAV +0.2%.
+    function proposeIssuance(uint256 tokenAmount) external onlyGP {
+        require(saleClosed, "Fund: sale open");
+        require(!issuanceVoteActive(), "Fund: vote already running");
+        require(tokenAmount > 0, "Fund: zero amount");
+        issueProposalId += 1;
+        issueProposed = tokenAmount;
+        issueDeadline = block.timestamp + VOTING_PERIOD;
+        issueYes = 0;
+        emit IssuanceProposed(issueProposalId, tokenAmount, issueDeadline);
+    }
+
+    /// @notice Vote yes by locking tokens in the fund until the vote ends.
+    function voteIssuance(uint256 tokenAmount) external {
+        require(issuanceVoteActive(), "Fund: no active vote");
+        require(msg.sender != gp, "Fund: GP cannot vote");
+        require(tokenAmount > 0, "Fund: zero amount");
+        issueEscrow[issueProposalId][msg.sender] += tokenAmount;
+        issueYes += tokenAmount;
+        require(token.transferFrom(msg.sender, address(this), tokenAmount), "Fund: lock failed");
+        emit IssuanceVoted(issueProposalId, msg.sender, tokenAmount);
+    }
+
+    /// @notice Executes as soon as more than 50% of eligible supply voted yes.
+    ///         The amount is added to what the book may issue.
+    function executeIssuance() external {
+        require(issuanceVoteActive(), "Fund: no active vote");
+        require(issueYes * 10_000 > eligibleSupply() * REMOVAL_THRESHOLD_BPS, "Fund: threshold not reached");
+        uint256 amount = issueProposed;
+        issueProposed = 0;
+        issuanceApproved += amount;
+        emit IssuanceApproved(issueProposalId, amount, issuanceApproved);
+    }
+
+    /// @notice Get locked voting tokens back once the vote is over.
+    function withdrawIssuanceVotes(uint256 id) external {
+        require(id < issueProposalId || !issuanceVoteActive(), "Fund: vote still running");
+        uint256 amount = issueEscrow[id][msg.sender];
+        require(amount > 0, "Fund: nothing locked");
+        issueEscrow[id][msg.sender] = 0;
+        require(token.transfer(msg.sender, amount), "Fund: unlock failed");
+    }
+
+    /// @notice New tokens for a buyer in the order book, at the book's issue
+    ///         price above NAV, out of what holders approved. Only the book
+    ///         can call this; it has already sent the payment to this vault.
+    function issue(address to, uint256 tokenAmount) external {
+        require(msg.sender == address(book), "Fund: only the book");
+        require(tokenAmount <= issuanceApproved, "Fund: above the approved issuance");
+        issuanceApproved -= tokenAmount;
+        token.mint(to, tokenAmount);
+        emit TokensIssued(tokenAmount, issuanceApproved);
         _emitNAV();
     }
 
@@ -344,11 +410,14 @@ contract SubFund {
     // ==================================================================
 
     /// @notice Supply that is allowed to vote: everything except unvested
-    ///         fee tokens, tokens in the pool and the GP's own wallet.
+    ///         fee tokens, the fund's own tokens on the ladder and the GP's
+    ///         own wallet. Holders' tokens in open sell orders still count:
+    ///         they can be taken out of the book and voted.
     function eligibleSupply() public view returns (uint256) {
+        (uint256 bookTokens, ) = ownedLiquidity();
         return token.totalSupply()
             - token.balanceOf(address(vesting))
-            - token.balanceOf(address(pool))
+            - bookTokens
             - token.balanceOf(gp);
     }
 

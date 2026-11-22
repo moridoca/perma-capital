@@ -245,7 +245,7 @@ nav.tabs svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stro
 .bh { color: var(--faint); font-family: var(--body); font-size: 10.5px; } .bh span:not(:first-child), .br span:not(:first-child), .tr span:not(:first-child) { text-align: right; }
 .br i { position: absolute; right: 0; top: 1px; bottom: 1px; z-index: 0; } .br span { position: relative; z-index: 1; }
 .br.ask i { background: var(--dn-soft); } .br.bid i { background: var(--up-soft); } .br.ask .p, .tr.ask .p { color: var(--dn); } .br.bid .p, .tr.bid .p { color: var(--up); }
-.tr em { font-style: normal; font-size: 9.5px; color: var(--accent); }
+.tr em, .br em { font-style: normal; font-size: 9.5px; color: var(--accent); }
 .bspread { grid-template-columns: auto auto auto 1fr; gap: 12px; background: var(--panel2); color: var(--muted); padding: 5px 10px; margin: 3px 0; } .bspread .bnav { text-align: right; color: var(--navline); }
 .bempty { padding: 10px; color: var(--faint); font-family: var(--body); }
 .bfoot { padding: 6px 10px 0; color: var(--faint); font-family: var(--body); font-size: 10.5px; line-height: 1.35; }
@@ -404,3 +404,7 @@ nav.tabs svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stro
   .pfchart { padding: 12px 16px 8px; }
 }
 @media (max-width: 699px) { .pfsvg .lb { font-size: 30px; } .pfdonut { width: 140px; height: 140px; } }
+
+/* Vaults */
+.vgrid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start; margin-top: 14px; }
+.tt tr[aria-selected="true"] { background: var(--panel2); }
