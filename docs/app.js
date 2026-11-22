@@ -12,7 +12,7 @@
   const ABI = {
     umbrella: [
       'function subFundCount() view returns (uint256)',
-      'function overview(uint256 index) view returns (string name, address fund, address token, address pool, address vesting, uint256 navPerToken, uint256 marketPrice, int256 premiumBps, uint256 netAssets)',
+      'function overview(uint256 index) view returns (string name, address fund, address token, address book, address vesting, uint256 navPerToken, uint256 marketPrice, int256 premiumBps, uint256 netAssets)',
       'function YEAR() view returns (uint256)',
       'function VOTING_PERIOD() view returns (uint256)'
     ],
@@ -50,7 +50,7 @@
       'function markInvestments(uint256 newValue, string memo)',
       'function returnProceeds(uint256 amount, uint256 newInvestedValue)',
       'function mintManagementFee()',
-      'function buyback(uint256 usdcAmount)',
+      'function buyback(uint256 usdcAmount, uint256[] ids)',
       'function openFollowOn(uint256 tokenAmount)',
       'function subscribe(uint256 tokenAmount, uint256 maxPrice)',
       'function proposeRemoveGP(address newGP)',
@@ -71,14 +71,21 @@
       'event Voted(uint256 indexed id, address indexed voter, uint256 tokens)',
       'event GPRemoved(uint256 indexed id, address oldGP, address newGP, uint256 burnedUnvested)'
     ],
-    pool: [
-      'function reserveToken() view returns (uint256)',
-      'function reserveUSDC() view returns (uint256)',
-      'function quoteUSDCForToken(uint256 usdcIn) view returns (uint256)',
-      'function quoteTokenForUSDC(uint256 tokenIn) view returns (uint256)',
-      'function swapUSDCForToken(uint256 usdcIn, uint256 minTokenOut) returns (uint256)',
-      'function swapTokenForUSDC(uint256 tokenIn, uint256 minUSDCOut) returns (uint256)',
-      'event Swap(address indexed trader, bool usdcForToken, uint256 amountIn, uint256 amountOut, uint256 priceAfter)'
+    book: [
+      'function TAKER_FEE_BPS() view returns (uint256)',
+      'function ladder() view returns (uint256 nav, uint256[] prices, uint256[] tokens, uint256[] cash)',
+      'function openOrders() view returns (uint256[] ids, address[] makers, bool[] isBuy, uint256[] prices, uint256[] tokens)',
+      'function quoteBuy(uint256 usdcIn, uint256[] ids) view returns (uint256 tokenOut, uint256 usdcSpent, uint256 priceAtEnd)',
+      'function quoteSell(uint256 tokenIn, uint256[] ids) view returns (uint256 usdcOut, uint256 tokenSold, uint256 priceAtEnd)',
+      'function buy(uint256 usdcIn, uint256 minTokenOut, uint256[] ids) returns (uint256 tokenOut, uint256 usdcSpent)',
+      'function sell(uint256 tokenIn, uint256 minUSDCOut, uint256[] ids) returns (uint256 usdcOut, uint256 tokenSold)',
+      'function limitBuy(uint256 tokenAmount, uint256 price, uint256[] ids) returns (uint256 id, uint256 filled)',
+      'function limitSell(uint256 tokenAmount, uint256 price, uint256[] ids) returns (uint256 id, uint256 filled)',
+      'function cancel(uint256 id)',
+      'event Trade(address indexed trader, bool usdcForToken, uint256 amountIn, uint256 amountOut, uint256 priceAfter)',
+      'event OrderPlaced(uint256 indexed id, address indexed maker, bool isBuy, uint256 price, uint256 tokens)',
+      'event OrderFilled(uint256 indexed id, address indexed taker, uint256 tokens, uint256 usdc)',
+      'event OrderCancelled(uint256 indexed id)'
     ],
     vesting: [
       'function trancheCount() view returns (uint256)',
@@ -102,8 +109,11 @@
     'function sessions(address) view returns (uint64 expiry, uint16 maxPremiumBps, uint16 maxDiscountBps, uint128 volumeCap, uint128 volumeUsed)',
     'function startSession(address key, uint64 expiry, uint128 volumeCap, uint16 maxPremiumBps, uint16 maxDiscountBps) payable',
     'function endSession(address key)',
-    'function buyInPool(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut) returns (uint256)',
-    'function sellInPool(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut) returns (uint256)',
+    'function buyInBook(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut, uint256[] ids) returns (uint256)',
+    'function sellInBook(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut, uint256[] ids) returns (uint256)',
+    'function limitBuyInBook(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] ids) returns (uint256 id, uint256 filled)',
+    'function limitSellInBook(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] ids) returns (uint256 id, uint256 filled)',
+    'function cancelInBook(uint256 fundIndex, uint256 orderId)',
     'function buyPrimary(uint256 fundIndex, uint256 tokenAmount)',
     'function withdrawToOwner(address token, uint256 amount)'
   ]
@@ -111,15 +121,15 @@
     'function accountOf(address) view returns (address)',
     'function create(address key, uint64 expiry, uint128 volumeCap, uint16 maxPremiumBps, uint16 maxDiscountBps) payable returns (address)'
   ]
-  const IFACE = { fund: new E.Interface(ABI.fund), pool: new E.Interface(ABI.pool), vesting: new E.Interface(ABI.vesting) }
+  const IFACE = { fund: new E.Interface(ABI.fund), book: new E.Interface(ABI.book), vesting: new E.Interface(ABI.vesting) }
 
   const state = {
     rpcIndex: 0, provider: null,
     funds: [], selected: 0, detail: null, me: null, sym: {},
-    tab: 'trade', sub: 'overview', range: 'All', pane: 'book', ttab: 'balances', side: 'buy', fsel: false, ff: 'all', fq: '',
+    tab: 'trade', sub: 'overview', range: 'All', pane: 'book', ttab: 'balances', side: 'buy', otype: 'market', fsel: false, ff: 'all', fq: '',
     year: 0, voting: 0,
     block: 0, chainTime: 0, fetchedAt: 0,
-    scan: {}, live: {},
+    scan: {}, live: {}, fee: {},
     account: null, signer: null, walletChainOk: false,
     busy: false, refreshing: false, pending: false, netOk: false, startedAt: 0, gen: 0, shown: -1, actionsKey: ''
   }
@@ -203,7 +213,7 @@
     const count = Number(await u.subFundCount())
     const rows = await Promise.all(Array.from({ length: count }, (_, i) => u.overview(i)))
     const funds = rows.map((o) => ({
-      name: o[0], fund: o[1], token: o[2], pool: o[3], vesting: o[4],
+      name: o[0], fund: o[1], token: o[2], book: o[3], vesting: o[4],
       nav: o[5], price: o[6], premiumBps: o[7], netAssets: o[8]
     }))
     // Per fund: who manages it, whether it trades, and the state of its vote. Token symbols never change.
@@ -225,23 +235,33 @@
     'outstandingSupply', 'navPerToken', 'marketPrice', 'premiumBps', 'feePerYear', 'buybackTriggerPrice', 'maxBuyback',
     'issuePrice', 'eligibleSupply', 'voteActive']
 
+  // Contracts deployed before the order book answer none of its calls: say so instead of a bare read error.
+  const oldDeployment = (e) => {
+    if (e && (e.code === 'CALL_EXCEPTION' || e.code === 'BAD_DATA')) throw new Error('This deployment still runs the earlier pool contracts. Deploy the order-book contracts with scripts/perma and enter the new addresses in docs/config.js.')
+    throw e
+  }
   async function loadDetail(p, f) {
     const fund = new E.Contract(f.fund, ABI.fund, p)
     const token = new E.Contract(f.token, ABI.erc20, p)
-    const pool = new E.Contract(f.pool, ABI.pool, p)
+    const book = new E.Contract(f.book, ABI.book, p)
     const vesting = new E.Contract(f.vesting, ABI.vesting, p)
+    // ladder() returns its rung prices together with the sizes, so a preview never mixes two blocks.
     const res = await Promise.all([
       ...FUND_KEYS.map((k) => fund[k]()),
       fund.ownedLiquidity(), token.totalSupply(), token.symbol(),
-      pool.reserveToken(), pool.reserveUSDC(), vesting.unvested(), vesting.claimable(), vesting.trancheCount()
+      book.ladder().catch(oldDeployment), book.openOrders(), vesting.unvested(), vesting.claimable(), vesting.trancheCount(),
+      state.fee[f.book] ? Promise.resolve(state.fee[f.book]) : book.TAKER_FEE_BPS()
     ])
     const d = {}
     FUND_KEYS.forEach((k, i) => { d[k] = res[i] })
     const n = FUND_KEYS.length
     d.polTokens = res[n][0]; d.polCash = res[n][1]
     d.totalSupply = res[n + 1]; d.symbol = res[n + 2]
-    d.reserveToken = res[n + 3]; d.reserveUSDC = res[n + 4]
+    const l = res[n + 3], o = res[n + 4]
+    d.lad = { prices: [...l[1]], tokens: [...l[2]], cash: [...l[3]] }
+    d.orders = [...o[0]].map((id, k) => ({ id, maker: o[1][k], isBuy: o[2][k], price: o[3][k], tokens: o[4][k] }))
     d.unvested = res[n + 5]; d.claimable = res[n + 6]; d.tranches = res[n + 7]
+    BOOK_FEE_BPS = state.fee[f.book] = res[n + 8]
     return d
   }
 
@@ -259,12 +279,12 @@
     const sc = state.scan[idx] || (state.scan[idx] = { next: CFG.deployBlock, events: [], ts: {}, failed: false })
     const byAddr = {}
     byAddr[f.fund.toLowerCase()] = IFACE.fund
-    byAddr[f.pool.toLowerCase()] = IFACE.pool
+    byAddr[f.book.toLowerCase()] = IFACE.book
     byAddr[f.vesting.toLowerCase()] = IFACE.vesting
     let guard = 0
     while (sc.next <= toBlock && guard++ < 60) {
       const end = Math.min(sc.next + CFG.logChunk - 1, toBlock)
-      const logs = await p.getLogs({ address: [f.fund, f.pool, f.vesting], fromBlock: sc.next, toBlock: end })
+      const logs = await p.getLogs({ address: [f.fund, f.book, f.vesting], fromBlock: sc.next, toBlock: end })
       for (const lg of logs) {
         const iface = byAddr[lg.address.toLowerCase()]
         let parsed = null
@@ -292,7 +312,7 @@
         if (ev.name === 'NAVUpdated') {
           lastNav = num(ev.args[0])
           pts.push({ t, nav: lastNav, price: num(ev.args[1]) })
-        } else if (ev.name === 'Swap' && lastNav !== null) {
+        } else if (ev.name === 'Trade' && lastNav !== null) {
           pts.push({ t, nav: lastNav, price: num(ev.args[4]) })
         }
       }
@@ -376,7 +396,7 @@
     if (!sc) return []
     const out = []
     for (const e of sc.events) {
-      if (e.name !== 'Swap' || sc.ts[e.block] === undefined) continue
+      if (e.name !== 'Trade' || sc.ts[e.block] === undefined) continue
       const buy = e.args[1], usdc = num(buy ? e.args[2] : e.args[3]), tok = num(buy ? e.args[3] : e.args[2])
       out.push({ t: sc.ts[e.block], buy, usdc, tok, px: tok ? usdc / tok : num(e.args[4]), after: num(e.args[4]), who: e.args[0], tx: e.tx, block: e.block })
     }
@@ -451,7 +471,7 @@
     return '<div class="fpanel" role="dialog" aria-label="Choose a fund"><div class="fptop"><label class="fsearch"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>' +
       '<input id="f-q" autocomplete="off" spellcheck="false" placeholder="Search funds" value="' + esc(state.fq) + '" aria-label="Search funds"></label><div class="fchips" role="group" aria-label="Filter">' +
       [['all', 'All'], ['live', 'Live'], ['ipo', 'Sale open'], ['held', 'Held']].map((c) => '<button aria-pressed="' + (state.ff === c[0]) + '" data-ff="' + c[0] + '">' + c[1] + ' <span>' + n(c[0]) + '</span></button>').join('') +
-      '</div></div><div id="f-list" class="flist">' + fundList() + '</div><div class="fpfoot"><span><kbd>Esc</kbd> close</span><span class="grow"></span><span>Each fund is a separate contract with its own token, vault and pool.</span></div></div>'
+      '</div></div><div id="f-list" class="flist">' + fundList() + '</div><div class="fpfoot"><span><kbd>Esc</kbd> close</span><span class="grow"></span><span>Each fund is a separate contract with its own token, vault and order book.</span></div></div>'
   }
   function placePanel() {
     const el = document.querySelector('.fpanel'), btn = $('fbtn')
@@ -463,7 +483,7 @@
   }
 
   // ---------- Trade ----------
-  const RANGES = { '1H': 3600, '6H': 21600, '1D': 86400, 'All': Infinity }
+  const RANGES = { '5m': 300, '15m': 900, '1H': 3600, '6H': 21600, '1D': 86400, 'All': Infinity }
   let candleData = null
   function candles() {
     const idx = state.selected, pts = buildSeries(idx)
@@ -502,7 +522,7 @@
         '<li><b>Primary sale.</b> Investors buy new tokens from the fund at a fixed $1.00. The money goes into the vault.</li>' +
         '<li><b>Close.</b> The GP closes the sale, or it sells out. For every 19 tokens sold, 1 token and $1 become fund-owned liquidity' +
         (d.sold > 0n ? ': at today\'s level ' + amt(pol) + ' ' + esc(d.symbol) + ' + ' + amt(pol) + ' mUSDC.' : '.') + '</li>' +
-        '<li><b>Market.</b> Trading opens at $1.00 in the pool. Candles from on-chain trades and the NAV line appear here.</li></ol></div>'
+        '<li><b>Market.</b> The order book opens around $1.00: the fund quotes ten 1% steps on each side of NAV, holders add limit orders. Candles from on-chain trades and the NAV line appear here.</li></ol></div>'
       return
     }
     if (!cd) { PUT('chartBox').h = '<p class="note">Loading price history…</p>'; return }
@@ -573,7 +593,7 @@
 
   function renderBook() {
     const d = state.detail, me = state.account
-    PUT('tpane').h = [['book', 'Pool depth'], ['trades', 'Trades']].map((p) => '<button aria-pressed="' + (state.pane === p[0]) + '" data-pane="' + p[0] + '">' + p[1] + '</button>').join('')
+    PUT('tpane').h = [['book', 'Order book'], ['trades', 'Trades']].map((p) => '<button aria-pressed="' + (state.pane === p[0]) + '" data-pane="' + p[0] + '">' + p[1] + '</button>').join('')
     const body = PUT('tbookBody')
     if (state.pane === 'trades') {
       const t = swapsOf(state.selected).slice(-28).reverse()
@@ -582,32 +602,40 @@
         : '<div class="bempty">No trades yet</div>'
       return
     }
-    const T = num(d.reserveToken), U = num(d.reserveUSDC)
-    if (!T || !U) { body.h = '<div class="bempty">The pool opens when the sale closes</div>'; return }
-    const k = T * U, P0 = U / T, nav = num(d.navPerToken), trig = num(d.buybackTriggerPrice)
-    const LV = [0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3]
-    const asks = [], bids = []
-    let pt = T, pu = U
-    for (const x of LV) { const P = P0 * (1 + x), tn = Math.sqrt(k / P), un = Math.sqrt(k * P); asks.push({ px: P, q: pt - tn, cum: un - U }); pt = tn }
-    pt = T
-    for (const x of LV) { const P = P0 * (1 - x), tn = Math.sqrt(k / P), un = Math.sqrt(k * P); bids.push({ px: P, q: tn - pt, cum: U - un }); pt = tn }
-    const mx = Math.max(asks[asks.length - 1].cum, bids[bids.length - 1].cum, 1)
-    const row = (r, side) => '<div class="br ' + side + '"><i style="width:' + ((r.cum / mx) * 100).toFixed(1) + '%"></i><span class="p">' + r.px.toFixed(4) + '</span><span>' + cmp(r.q) + '</span><span>' + cmp(r.cum) + '</span></div>'
+    if (!d.saleClosed || !d.lad) { body.h = '<div class="bempty">The order book opens when the sale closes</div>'; return }
+    const nav = num(d.navPerToken), trig = num(d.buybackTriggerPrice), mine = myAddr()
+    // One row per price: the fund's rung and holders' orders at that price together.
+    const levels = (bid) => {
+      const by = new Map()
+      const add = (price, q, own) => { const k = price.toString(), r = by.get(k) || { price, q: 0n, fund: false, own: false }; r.q += q; if (own === null) r.fund = true; else if (own) r.own = true; by.set(k, r) }
+      d.lad.prices.forEach((price, i) => { const q = bid ? bidSize(d.lad.cash[i], price) : d.lad.tokens[i]; if (q > 0n && price > 0n) add(price, q, null) })
+      for (const o of d.orders) if (o.isBuy === bid && o.tokens > 0n) add(o.price, o.tokens, o.maker.toLowerCase() === mine)
+      const rows = [...by.values()].sort((x, y) => (x.price === y.price ? 0 : (x.price < y.price) === bid ? 1 : -1)).slice(0, 8)
+      let cum = 0
+      return rows.map((r) => { cum += num(r.q) * num(r.price); return { px: num(r.price), q: num(r.q), cum, fund: r.fund, own: r.own } })
+    }
+    const asks = levels(false), bids = levels(true)
+    const mx = Math.max(asks.length ? asks[asks.length - 1].cum : 0, bids.length ? bids[bids.length - 1].cum : 0, 1)
+    const row = (r, side) => '<div class="br ' + side + '"><i style="width:' + ((r.cum / mx) * 100).toFixed(1) + '%"></i><span class="p">' + r.px.toFixed(4) + (r.fund ? '' : ' <em>' + (r.own ? 'you' : 'holder') + '</em>') +
+      (r.fund && r.own ? ' <em>+you</em>' : '') + '</span><span>' + cmp(r.q) + '</span><span>' + cmp(r.cum) + '</span></div>'
     let bidHtml = '', placed = false
     for (const r of bids) {
-      if (!placed && trig >= r.px && trig < P0) { bidHtml += '<div class="lsep refl">buyback trigger ' + trig.toFixed(4) + '</div>'; placed = true }
+      if (!placed && trig >= r.px) { bidHtml += '<div class="lsep refl">buyback trigger ' + trig.toFixed(4) + '</div>'; placed = true }
       bidHtml += row(r, 'bid')
     }
-    const share = T ? (num(d.polTokens) / T) * 100 : 0
-    body.h = '<div class="bh"><span>Price</span><span>Size (' + esc(d.symbol) + ')</span><span>Total (mUSDC)</span></div><div class="basks">' + asks.slice().reverse().map((r) => row(r, 'ask')).join('') + '</div>' +
-      '<div class="bspread"><span>Pool</span><span>' + P0.toFixed(4) + '</span><span>' + (trig >= P0 ? 'buyback triggered' : '') + '</span><span class="bnav">NAV ' + nav.toFixed(4) + '</span></div>' +
-      '<div class="bbids">' + bidHtml + '</div><p class="bfoot">A pool has no order book. Each level shows how much it trades before its price reaches that level, before the 0.30% fee. The fund owns ' +
-      share.toFixed(0) + '% of this pool and cannot withdraw it.</p>'
+    const P0 = num(d.marketPrice)
+    body.h = '<div class="bh"><span>Price</span><span>Size (' + esc(d.symbol) + ')</span><span>Total (mUSDC)</span></div><div class="basks">' +
+      (asks.length ? asks.slice().reverse().map((r) => row(r, 'ask')).join('') : '<div class="bempty">No offers: the ladder is sold out</div>') + '</div>' +
+      '<div class="bspread"><span>Market</span><span>' + P0.toFixed(4) + '</span><span>' + (d.marketPrice <= d.buybackTriggerPrice ? 'buyback triggered' : '') +
+      '</span><span class="bnav">NAV ' + nav.toFixed(4) + '</span></div>' +
+      '<div class="bbids">' + (bidHtml || '<div class="bempty">No bids: the ladder\'s cash is used up</div>') + '</div><p class="bfoot">Unmarked rows are the fund\'s own ladder: its liquidity in ten 1% steps on each side of NAV, moving with NAV and not withdrawable. ' +
+      'Marked rows are holders\' limit orders at fixed prices. Taking costs ' + feeText() + ', resting orders pay nothing.</p>'
   }
 
   function renderBottom() {
     const d = state.detail, m = state.me, f = cur()
-    const tabs = [['balances', 'Balances'], ['mine', 'Trade history'], ['treasury', 'Treasury'], ['markets', 'Markets']]
+    const mineOpen = d.orders && state.account ? d.orders.filter((o) => o.maker.toLowerCase() === myAddr()) : []
+    const tabs = [['balances', 'Balances'], ['orders', 'Open orders' + (mineOpen.length ? ' (' + mineOpen.length + ')' : '')], ['mine', 'Trade history'], ['treasury', 'Treasury'], ['markets', 'Markets']]
     PUT('ttabs').h = tabs.map((t) => '<button aria-pressed="' + (state.ttab === t[0]) + '" data-ttab="' + t[0] + '">' + t[1] + '</button>').join('')
     let h = ''
     if (state.ttab === 'balances') {
@@ -621,14 +649,20 @@
               (p ? p.toFixed(4) : '–') + '</td><td>' + (p ? '$' + cmp(all * p) : '–') + '</td><td>' + nv.toFixed(4) + '</td><td>$' + cmp(all * nv) + '</td><td><button class="tlink" data-go="trade" data-fund="' + i + '">Trade</button></td></tr>' }).join('') + '</tbody></table>'
         if (!m.by.some((b) => b.token > 0n || b.escrowed > 0n)) h += '<p class="note">No fund tokens in this wallet yet.</p>'
       }
+    } else if (state.ttab === 'orders') {
+      h = mineOpen.length ? '<table class="tt"><thead><tr><th class="l">Order</th><th class="l">Side</th><th>Limit price</th><th>Vs NAV</th><th>Open size (' + esc(d.symbol) + ')</th><th>mUSDC</th><th></th></tr></thead><tbody>' +
+        mineOpen.slice().sort((x, y) => (x.id < y.id ? 1 : -1)).map((o) => '<tr data-a="cancel"><td class="l">#' + o.id + '</td><td class="l ' + (o.isBuy ? 'up' : 'dn') + '">' + (o.isBuy ? 'Buy' : 'Sell') + '</td><td>' + num(o.price).toFixed(4) +
+          '</td><td>' + esc(vsNav(o.price, d.navPerToken)) + '</td><td>' + amt(o.tokens) + '</td><td>' + amt((o.tokens * o.price) / U6) + '</td><td><input type="hidden" data-k="id" value="' + o.id + '"><button class="tlink go">Cancel</button></td></tr>').join('') +
+        '</tbody></table><p class="note">Resting orders pay no fee. Cancelling returns the tokens or mUSDC held for the order.</p>'
+        : '<p class="note">' + (state.account ? 'No open orders in ' + esc(d.symbol) + '. Choose Limit in the order form to place one.' : 'Connect a wallet to see its orders.') + '</p>'
     } else if (state.ttab === 'mine') {
       const me = state.account, t = me ? swapsOf(state.selected).filter((x) => x.who.toLowerCase() === me.toLowerCase()).reverse() : []
-      h = t.length ? '<table class="tt"><thead><tr><th class="l">Time</th><th class="l">Side</th><th>Price</th><th>Size (' + esc(d.symbol) + ')</th><th>mUSDC</th><th>Pool price after</th><th></th></tr></thead><tbody>' +
+      h = t.length ? '<table class="tt"><thead><tr><th class="l">Time</th><th class="l">Side</th><th>Price</th><th>Size (' + esc(d.symbol) + ')</th><th>mUSDC</th><th>Market after</th><th></th></tr></thead><tbody>' +
         t.map((x) => '<tr><td class="l">' + esc(clock(x.t, true)) + '</td><td class="l ' + (x.buy ? 'up' : 'dn') + '">' + (x.buy ? 'Buy' : 'Sell') + '</td><td>' + x.px.toFixed(4) + '</td><td>' + cmp(x.tok) + '</td><td>' + cmp(x.usdc) +
           '</td><td>' + x.after.toFixed(4) + '</td><td><a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/tx/' + esc(x.tx) + '">tx</a></td></tr>').join('') + '</tbody></table>'
-        : '<p class="note">' + (me ? 'This wallet has not traded ' + esc(d.symbol) + ' in the pool yet.' : 'Connect a wallet to see its trades.') + '</p>'
+        : '<p class="note">' + (me ? 'This wallet has not taken liquidity in ' + esc(d.symbol) + ' yet. Fills of its resting orders are not listed here.' : 'Connect a wallet to see its trades.') + '</p>'
     } else if (state.ttab === 'treasury') {
-      const below = d.saleClosed && d.marketPrice < d.buybackTriggerPrice
+      const below = d.saleClosed && d.marketPrice <= d.buybackTriggerPrice
       const r = (k, v) => '<tr><td class="l">' + k + '</td><td class="l">' + v + '</td></tr>'
       h = '<table class="tt kv"><tbody>' + r('Vault cash', amt(d.vaultCash) + ' mUSDC') + r('Fund-owned liquidity', amt(d.polTokens) + ' ' + esc(d.symbol) + ' + ' + amt(d.polCash) + ' mUSDC, cannot be withdrawn') +
         r('Invested value', amt(d.investedValue) + ' mUSDC <span class="pill warn">GP-reported</span>') + r('Buyback trigger', usd(d.buybackTriggerPrice) + (below ? ' <span class="pill warn">triggered</span>' : ' · not triggered')) +
@@ -676,8 +710,8 @@
       cell('Net assets', amt(d.netAssets), 'mUSDC') +
       cell('Vault cash', amt(d.vaultCash), 'mUSDC, read on-chain') +
       cell('Invested value', amt(d.investedValue), '<span class="pill warn">GP-reported</span> ' + share.toFixed(1) + '% of net assets') +
-      cell('Outstanding supply', amt(d.outstandingSupply), s + ', excl. fund-owned pool tokens') +
-      cell('Pool reserves', open ? amt(d.reserveToken) + ' / ' + amt(d.reserveUSDC) : '–', open ? s + ' / mUSDC' : 'opens when the sale closes') +
+      cell('Outstanding supply', amt(d.outstandingSupply), s + ', excl. the fund\'s tokens on the ladder') +
+      cell('Fund liquidity in the book', open ? amt(d.polTokens) + ' / ' + amt(d.polCash) : '–', open ? s + ' / mUSDC on the ladder' : 'placed when the sale closes') +
       cell('Fund-owned liquidity', open ? amt(d.polTokens) + ' / ' + amt(d.polCash) : '–', open ? s + ' / mUSDC, cannot be withdrawn' : 'created when the sale closes')
   }
   const gapText = (bps) => (bps < 0 ? 'discount ' : 'premium ') + pct(Math.abs(bps))
@@ -685,8 +719,8 @@
   // One entry per rule: [state of the lamp, status html]. 'off' = needs attention or can be acted on now.
   const RULES = [
     { k: 'sale', t: 'Primary sale', p: 'Fixed $1.00 per token, hard cap of 9,500,000 tokens.', act: 'close' },
-    { k: 'pol', t: 'Fund-owned liquidity', p: '5% of supply plus the same cash goes into the pool. The fund has no function to withdraw it.' },
-    { k: 'buyback', t: 'Buyback-and-burn', p: 'Anyone can trigger it while the market is more than 10% below NAV. At most 1% of vault cash per execution.', act: 'buyback' },
+    { k: 'pol', t: 'Fund-owned liquidity', p: '5% of supply plus the same cash goes into the order book, quoted in ten 1% steps on each side of NAV. The fund has no function to withdraw it.' },
+    { k: 'buyback', t: 'Buyback-and-burn', p: 'Anyone can trigger it once the market has fallen to 10% below NAV, the bottom of the fund\'s ladder. At most 1% of vault cash per execution.', act: 'buyback' },
     { k: 'followon', t: 'Follow-on issuance', p: 'New tokens only at the higher of NAV and market price, so new money never dilutes holders.' },
     { k: 'fee', t: 'Management fee', p: '2% of initial supply per year, paid in new tokens. Ten tranches at most, each locked for one year.', act: 'fee' },
     { k: 'gov', t: 'GP removal', p: 'More than 50% of eligible supply replaces the GP. Unvested fee tokens are burned.' },
@@ -700,12 +734,12 @@
       return d.saleClosed ? ['ok', '<span class="pill">closed</span> <span class="num">' + amt(d.sold) + '</span> sold (' + p.toFixed(1) + '% of cap)' + bar]
         : ['off', '<span class="pill ipo">open</span> <span class="num">' + amt(d.sold) + '</span> sold (' + p.toFixed(1) + '% of cap)' + bar]
     }
-    if (k === 'pol') return d.saleClosed ? ['ok', '<span class="num">' + amt(d.polTokens) + '</span> ' + s + ' + <span class="num">' + amt(d.polCash) + '</span> mUSDC in the pool']
+    if (k === 'pol') return d.saleClosed ? ['ok', '<span class="num">' + amt(d.polTokens) + '</span> ' + s + ' + <span class="num">' + amt(d.polCash) + '</span> mUSDC on the ladder']
       : ['idle', 'Created when the sale closes']
     if (k === 'buyback') {
       if (!d.saleClosed) return ['idle', 'Opens with the market']
       const cool = Number(d.lastBuyback) + Math.floor(state.year / 52) - t
-      const below = d.marketPrice < d.buybackTriggerPrice
+      const below = d.marketPrice <= d.buybackTriggerPrice
       return [below ? 'off' : 'ok', (below ? '<span class="pill warn">triggered</span> ' : '<span class="pill">not triggered</span> ') +
         'market <span class="num">' + usd(d.marketPrice) + '</span> vs trigger <span class="num">' + usd(d.buybackTriggerPrice) + '</span>' +
         '<br>Max size now: <span class="num">' + amt(d.maxBuyback) + '</span> mUSDC' + (below && cool > 0 ? ' · cooldown ' + dur(cool) : '')]
@@ -759,9 +793,9 @@
       case 'RemovalProposed': return 'Vote #' + a[0] + ': ' + short(a[1]) + ' proposed ' + short(a[2]) + ' as new GP'
       case 'Voted': return short(a[1]) + ' locked ' + amt(a[2]) + ' ' + s + ' as yes votes'
       case 'GPRemoved': return 'GP replaced: ' + short(a[1]) + ' → ' + short(a[2]) + '; ' + amt(a[3]) + ' unvested fee tokens burned'
-      case 'Swap': return a[1]
-        ? 'Pool: ' + short(a[0]) + ' bought ' + amt(a[3]) + ' ' + s + ' for ' + amt(a[2]) + ' mUSDC, price now ' + usd(a[4])
-        : 'Pool: ' + short(a[0]) + ' sold ' + amt(a[2]) + ' ' + s + ' for ' + amt(a[3]) + ' mUSDC, price now ' + usd(a[4])
+      case 'Trade': return a[1]
+        ? 'Market: ' + short(a[0]) + ' bought ' + amt(a[3]) + ' ' + s + ' for ' + amt(a[2]) + ' mUSDC, price now ' + usd(a[4])
+        : 'Market: ' + short(a[0]) + ' sold ' + amt(a[2]) + ' ' + s + ' for ' + amt(a[3]) + ' mUSDC, price now ' + usd(a[4])
       case 'Claimed': return 'GP claimed ' + amt(a[1]) + ' vested ' + s
       default: return null
     }
@@ -798,11 +832,11 @@
     h += '<div class="rgrid"><div class="rsec"><div class="sechead"><h2>Statement of net assets</h2><small>mUSDC</small></div><div class="rtab"><table class="fin"><tbody>' +
       '<tr class="hd"><td colspan="2">Assets</td></tr>' +
       fr('Vault cash', amt(d.vaultCash), '', 'read on-chain') +
-      fr('Cash in the fund-owned pool position', amt(d.polCash), '', 'read on-chain') +
+      fr('Cash on the fund\'s ladder in the order book', amt(d.polCash), '', 'read on-chain') +
       fr('Investments', amt(d.investedValue), '', 'reported by the GP') +
       fr('Net assets', amt(d.netAssets), 't') +
       '<tr class="hd"><td colspan="2">Tokens (' + s + ')</td></tr>' +
-      fr('Total supply', amt(d.totalSupply)) + fr('Less: fund-owned tokens in the pool', neg(d.polTokens), '', 'treasury stock') +
+      fr('Total supply', amt(d.totalSupply)) + fr('Less: the fund\'s tokens on the ladder', neg(d.polTokens), '', 'treasury stock') +
       fr('Outstanding supply', amt(d.outstandingSupply), 's') + fr('NAV per token', usd(d.navPerToken), 't') + '</tbody></table></div></div>'
 
     h += '<div class="rsec"><div class="sechead"><h2>Capital account since launch</h2><small>from events, mUSDC</small></div><div class="rtab"><table class="fin"><tbody>' +
@@ -847,7 +881,7 @@
     }
     h += '<div class="rsec"><div class="sechead"><h2>Event log</h2><small>newest first</small></div>' + (items.length ? '<div class="rtab" id="feed"><table class="rt"><tbody>' + items.join('') + '</tbody></table></div>'
       : '<p class="note" id="feed">' + (sc ? 'No activity in this sub-fund yet.' : 'Loading history…') + '</p>') + '</div>'
-    const rows = [['Umbrella', CFG.umbrella], ['mUSDC', CFG.usdc], ['Fund', f.fund], ['Token', f.token], ['Pool', f.pool], ['Vesting', f.vesting]]
+    const rows = [['Umbrella', CFG.umbrella], ['mUSDC', CFG.usdc], ['Fund', f.fund], ['Token', f.token], ['Order book', f.book], ['Vesting', f.vesting]]
     h += '<div class="rsec"><div class="sechead"><h2>Contracts</h2><small>' + esc(CFG.network) + '</small></div><div class="card"><dl class="kv" id="addrs">' +
       rows.map((r) => '<dt>' + r[0] + '</dt><dd><a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/address/' + esc(r[1]) + '">' + esc(r[1]) + '</a></dd>').join('') + '</dl></div></div>'
     PUT('reports').h = h
@@ -856,7 +890,7 @@
   // ---------- Portfolio ----------
   function renderPortfolio() {
     const m = state.me
-    let h = '<section class="pfhead"><div><h1>Portfolio</h1><p class="lead">' + (state.account ? (tkOn() ? 'Trading account ' : 'Wallet ') + link(state.account) + ' · values at the pool price' : 'No wallet connected') + '</p></div></section>'
+    let h = '<section class="pfhead"><div><h1>Portfolio</h1><p class="lead">' + (state.account ? (tkOn() ? 'Trading account ' : 'Wallet ') + link(state.account) + ' · values at the market price' : 'No wallet connected') + '</p></div></section>'
     if (!m) {
       h += '<div class="tp pfnone">' + (window.ethereum ? 'Connect a wallet on ' + esc(CFG.network) + ' to see its holdings.' : 'This browser has no wallet. Reading works without one; holdings need MetaMask.') + '</div>'
     } else {
@@ -867,12 +901,12 @@
           (f.price > 0n ? num(f.price).toFixed(4) : '1.0000 <small>issue</small>') + '</td><td>$' + cmp(all * p) + '</td><td>' + nv.toFixed(4) + '</td><td>$' + cmp(all * nv) + '</td><td>' + (b.isGP ? '<span class="pill warn">GP</span>' : '') + '</td></tr>' }).join('')
       const cash = num(m.usdc), total = cash + vm
       const stat = (k, v, sub) => '<div class="pfs"><span>' + k + '</span><b class="num">' + v + '</b>' + (sub ? '<small class="num">' + sub + '</small>' : '') + '</div>'
-      h += '<section class="pfgrid"><div class="pfcol tp">' + stat('Account value', '$' + cmp(total), 'cash plus tokens at the pool price') +
+      h += '<section class="pfgrid"><div class="pfcol tp">' + stat('Account value', '$' + cmp(total), 'cash plus tokens at the market price') +
         stat('Tokens at market', '$' + cmp(vm), held + (held === 1 ? ' fund' : ' funds')) + stat('Tokens at NAV', '$' + cmp(vn), vm ? pcs(vm / vn - 1) + ' market vs NAV' : '–') +
         stat('Cash (mUSDC)', '$' + cmp(cash), 'test money') + stat('Locked in votes', cmp(m.by.reduce((a, b) => a + num(b.escrowed), 0)), 'tokens') + '</div>' +
         '<div class="tp pftabs"><div class="ttabs"><button aria-pressed="true">Holdings</button></div><div class="pftb">' +
         (held ? '<table class="tt"><thead><tr><th class="l">Fund</th><th>Balance</th><th>Locked</th><th>Price</th><th>Value at market</th><th>NAV</th><th>Value at NAV</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
-          : '<p class="note pfpad">No fund tokens in this wallet yet. Get test mUSDC below, then buy in a primary sale or in a pool.</p>') + '</div></div></section>'
+          : '<p class="note pfpad">No fund tokens in this wallet yet. Get test mUSDC below, then buy in a primary sale or in an order book.</p>') + '</div></div></section>'
     }
     PUT('pf').h = h
   }
@@ -996,7 +1030,7 @@
 
   // ---------- fast trading: trading account + session key ----------
   // The investor's funds sit in a TradingAccount contract that only their wallet owns.
-  // A session key created in this browser may trade for it - only in this umbrella's pools
+  // A session key created in this browser may trade for it - only in this umbrella's order books
   // and primary sales, until an expiry, up to a volume cap and within price limits around
   // NAV - and may send funds back to the owner, never anywhere else. Like an agent key on
   // Hyperliquid: orders go out without a wallet pop-up. The key itself holds only gas.
@@ -1011,7 +1045,7 @@
     if (pk) { state.tk.wallet = new E.Wallet(pk); state.tk.on = store.get(TK + '.on') === '1'; state.tk.acct = store.get(TK + '.acct'); state.tk.owner = store.get(TK + '.owner') }
   } catch (e) { state.tk.wallet = null }
   const TK_LOW = E.parseEther(CFG.tkLow || '0.0002')
-  const SESSION_ONLY = { swapbuy: 1, sell: 1, buy: 1, faucet: 1, mint: 1 }      // routed through the trading account
+  const SESSION_ONLY = { swapbuy: 1, sell: 1, limitbuy: 1, limitsell: 1, cancel: 1, buy: 1, faucet: 1, mint: 1 }      // routed through the trading account
   const SESSION_DIRECT = { buyback: 1, fee: 1, close: 1, execute: 1 }          // need no funds: the key calls the fund itself
   const sessActive = () => !!(state.tk.sess && Number(state.tk.sess.expiry) > now())
   function tkOn() { return !!(state.tk.on && state.tk.wallet && state.tk.acct && sessActive()) }
@@ -1225,10 +1259,63 @@
     address: (k, ph) => ({ k, ph, type: 'address' }),
     text: (k, ph) => ({ k, ph, type: 'text' })
   }
-  const FEE = 9970n // the pool keeps 0.30% of every swap
-  const ammOut = (amountIn, rIn, rOut) => (amountIn <= 0n || rIn === 0n || rOut === 0n ? 0n : (amountIn * FEE * rOut) / (rIn * 10000n + amountIn * FEE))
   const vsNav = (price, nav) => gapText(Number(((price - nav) * 10000n) / nav))
   const U6 = 10n ** 6n
+
+  // >>> book maths
+  // The same walk and the same rounding as OrderBook._match, so a preview shows what the contract will do.
+  let BOOK_FEE_BPS = 7n // replaced by the contract's TAKER_FEE_BPS when a fund is loaded
+  const bookFee = (cash) => (cash * BOOK_FEE_BPS + 9999n) / 10000n
+  const bidSize = (cash, price) => { if (price === 0n) return 0n; const s = (cash * U6) / price; return (s * price) / U6 === 0n ? 0n : s }
+  // lad: { prices, tokens, cash } of the 20 rungs. orders: open orders of the other side, best price first.
+  function bookMatch(buying, maxTokens, maxCash, limit, lad, orders) {
+    const n = lad.prices.length, tok = lad.tokens.slice(), cash = lad.cash.slice()
+    const m = { tokens: 0n, cash: 0n, last: 0n, fills: [] }
+    let i = buying ? 0 : n, j = 0
+    while (m.tokens < maxTokens) {
+      let rp = 0n, ra = 0n
+      if (buying) { for (; i < n; i++) if (tok[i] > 0n && lad.prices[i] > 0n) { rp = lad.prices[i]; ra = tok[i]; break } }
+      else { for (; i > 0; i--) { const a = bidSize(cash[i - 1], lad.prices[i - 1]); if (a > 0n) { rp = lad.prices[i - 1]; ra = a; break } } }
+      let op = 0n, oa = 0n
+      for (; j < orders.length; j++) { const o = orders[j]; if (o.tokens > 0n && (buying || (o.tokens * o.price) / U6 > 0n)) { op = o.price; oa = o.tokens; break } }
+      if (ra === 0n && oa === 0n) break
+      const useOrder = oa > 0n && (ra === 0n || (buying ? op <= rp : op >= rp))
+      const p = useOrder ? op : rp
+      if (buying ? p > limit : p < limit) break
+      let q = useOrder ? oa : ra, c
+      if (q > maxTokens - m.tokens) q = maxTokens - m.tokens
+      if (buying) { const afford = ((maxCash - m.cash) * U6) / p; if (q > afford) q = afford; if (q === 0n) break; c = (q * p + U6 - 1n) / U6 }
+      else { c = (q * p) / U6; if (c === 0n) break }
+      m.tokens += q; m.cash += c; m.last = p
+      if (useOrder) { m.fills.push({ id: orders[j].id, q }); j++ }
+      else if (buying) { tok[i] -= q; cash[i] += c }
+      else { cash[i - 1] -= c; tok[i - 1] += q }
+    }
+    m.fee = bookFee(m.cash)
+    m.ladder = { prices: lad.prices, tokens: tok, cash }
+    return m
+  }
+  const BOOK_NO_CAP = (1n << 128n) - 1n
+  const bookBuy = (usdcIn, lad, orders) => bookMatch(true, BOOK_NO_CAP, (usdcIn * 10000n) / (10000n + BOOK_FEE_BPS), (1n << 256n) - 1n, lad, orders)
+  const bookSell = (tokenIn, lad, orders) => bookMatch(false, tokenIn, BOOK_NO_CAP, 0n, lad, orders)
+  // Open orders a taker would name: the other side, best price first, at most `max`.
+  const bookHints = (buying, open, limit, max) => open.filter((o) => o.isBuy !== buying && o.tokens > 0n && (limit == null || (buying ? o.price <= limit : o.price >= limit)))
+    .sort((a, b) => (a.price === b.price ? (a.id < b.id ? -1 : 1) : (buying ? (a.price < b.price ? -1 : 1) : (a.price > b.price ? -1 : 1)))).slice(0, max || 40)
+  // The ladder's own price, as OrderBook.spotPrice() computes it.
+  function bookSpot(lad) {
+    let ask = 0n, bid = 0n
+    for (let i = 0; i < lad.prices.length; i++) if (lad.tokens[i] > 0n) { ask = lad.prices[i]; break }
+    for (let i = lad.prices.length; i > 0; i--) if (bidSize(lad.cash[i - 1], lad.prices[i - 1]) > 0n) { bid = lad.prices[i - 1]; break }
+    return ask === 0n ? bid : bid === 0n ? ask : (ask + bid) / 2n
+  }
+  // <<< book maths
+
+  const myAddr = () => (state.account || '').toLowerCase()
+  const feeText = () => (Number(BOOK_FEE_BPS) / 100).toFixed(2) + '%'
+  // The resting orders a taker names: the other side, best price first, never its own.
+  const hintsFor = (d, buying, limit) => bookHints(buying, d.orders.filter((o) => o.maker.toLowerCase() !== myAddr()), limit)
+  const ceilMul = (tokens, price) => (tokens * price + U6 - 1n) / U6
+  const marketOpen = (d) => need(d.saleClosed, 'The market opens when the sale closes.')
 
   const ACTIONS = [
     { id: 'faucet', title: 'Get test mUSDC', btn: 'Get 100,000 test mUSDC', fields: [],
@@ -1243,32 +1330,69 @@
       why: (d) => need(!d.saleClosed, 'The primary sale is closed.'),
       pre: (d, m, v) => 'Cost: ' + amt(v.a) + ' mUSDC' + (m ? ' · wallet holds ' + amt(m.usdc) : ''),
       steps: async (c, v) => [await approval(c, c.usdc, c.f.fund, v.a, 'mUSDC'), ['Buying in the primary sale', c.fund, 'buy', [v.a]]] },
-    { id: 'swapbuy', title: 'Buy in the pool', btn: 'Buy', term: 'buy', fields: [F.usdc('a')],
-      why: (d) => need(d.saleClosed, 'The market opens when the sale closes.'),
+    { id: 'swapbuy', title: 'Buy in the order book', btn: 'Buy', term: 'buy', fields: [F.usdc('a')],
+      why: marketOpen,
       quote: (d, m, v) => {
-        const out = ammOut(v.a, d.reserveUSDC, d.reserveToken)
-        if (out === 0n || out >= d.reserveToken) return null
-        const after = ((d.reserveUSDC + v.a) * U6) / (d.reserveToken - out)
-        return [['You pay', amt(v.a) + ' mUSDC'], ['You receive about', amt(out) + ' ' + d.symbol], ['Average price', usd((v.a * U6) / out)], ['Pool price after', usd(after)],
-          ['Vs NAV after', vsNav(after, d.navPerToken)], ['Pool fee', '0.30%'], ['Minimum received', amt((out * 99n) / 100n) + ' ' + d.symbol]]
+        const sim = bookBuy(v.a, d.lad, hintsFor(d, true))
+        if (sim.tokens === 0n) return [['Nothing on offer', 'the book has no sell side right now']]
+        const paid = sim.cash + sim.fee
+        return [['You pay', amt(paid) + ' mUSDC'], ['You receive about', amt(sim.tokens) + ' ' + d.symbol], ['Average price', usd((paid * U6) / sim.tokens)], ['Last fill at', usd(sim.last)],
+          ['Last fill vs NAV', vsNav(sim.last, d.navPerToken)], ['Taker fee (' + feeText() + ')', amt(sim.fee) + ' mUSDC'], ['Minimum received', amt((sim.tokens * 99n) / 100n) + ' ' + d.symbol]]
+          .concat(v.a - paid > U6 ? [['Not filled', amt(v.a - paid) + ' mUSDC: the book offers no more']] : [])
       },
       steps: async (c, v) => {
-        const out = await c.pool.quoteUSDCForToken(v.a)
-        return [await approval(c, c.usdc, c.f.pool, v.a, 'mUSDC'), ['Buying in the pool', c.pool, 'swapUSDCForToken', [v.a, (out * 99n) / 100n]]]
+        const ids = hintsFor(c.d, true).map((o) => o.id), q = await c.book.quoteBuy(v.a, ids)
+        return [await approval(c, c.usdc, c.f.book, v.a, 'mUSDC'), ['Buying in the order book', c.book, 'buy', [v.a, (q[0] * 99n) / 100n, ids]]]
       } },
-    { id: 'sell', title: 'Sell in the pool', btn: 'Sell', term: 'sell', fields: [F.tok('a')],
-      why: (d) => need(d.saleClosed, 'The market opens when the sale closes.'),
+    { id: 'sell', title: 'Sell in the order book', btn: 'Sell', term: 'sell', fields: [F.tok('a')],
+      why: marketOpen,
       quote: (d, m, v) => {
-        const out = ammOut(v.a, d.reserveToken, d.reserveUSDC)
-        if (out === 0n) return null
-        const after = ((d.reserveUSDC - out) * U6) / (d.reserveToken + v.a)
-        return [['You sell', amt(v.a) + ' ' + d.symbol], ['You receive about', amt(out) + ' mUSDC'], ['Average price', usd((out * U6) / v.a)], ['Pool price after', usd(after)],
-          ['Vs NAV after', vsNav(after, d.navPerToken)], ['Pool fee', '0.30%'], ['Minimum received', amt((out * 99n) / 100n) + ' mUSDC']]
+        const sim = bookSell(v.a, d.lad, hintsFor(d, false))
+        if (sim.tokens === 0n) return [['No bids', 'the book has no buy side right now']]
+        const out = sim.cash - sim.fee
+        return [['You sell', amt(sim.tokens) + ' ' + d.symbol], ['You receive about', amt(out) + ' mUSDC'], ['Average price', usd((out * U6) / sim.tokens)], ['Last fill at', usd(sim.last)],
+          ['Last fill vs NAV', vsNav(sim.last, d.navPerToken)], ['Taker fee (' + feeText() + ')', amt(sim.fee) + ' mUSDC'], ['Minimum received', amt((out * 99n) / 100n) + ' mUSDC']]
+          .concat(v.a - sim.tokens > 0n ? [['Not filled', amt(v.a - sim.tokens) + ' ' + d.symbol + ': the book bids for no more']] : [])
       },
       steps: async (c, v) => {
-        const out = await c.pool.quoteTokenForUSDC(v.a)
-        return [await approval(c, c.token, c.f.pool, v.a, c.d.symbol), ['Selling in the pool', c.pool, 'swapTokenForUSDC', [v.a, (out * 99n) / 100n]]]
+        const ids = hintsFor(c.d, false).map((o) => o.id), q = await c.book.quoteSell(v.a, ids)
+        return [await approval(c, c.token, c.f.book, v.a, c.d.symbol), ['Selling in the order book', c.book, 'sell', [v.a, (q[0] * 99n) / 100n, ids]]]
       } },
+    { id: 'limitbuy', title: 'Limit buy', btn: 'Buy', term: 'buy', otype: 'limit', fields: [F.usdc('p'), F.tok('a')],
+      why: marketOpen,
+      quote: (d, m, v) => {
+        if (v.p <= 0n) return null
+        const sim = bookMatch(true, v.a, BOOK_NO_CAP, v.p, d.lad, hintsFor(d, true, v.p))
+        const rest = v.a - sim.tokens >= U6 ? v.a - sim.tokens : 0n
+        return [['Limit price', usd(v.p)], ['Vs NAV', vsNav(v.p, d.navPerToken)],
+          ['Fills at once', sim.tokens > 0n ? amt(sim.tokens) + ' ' + d.symbol + ' at avg ' + usd((sim.cash * U6) / sim.tokens) : 'nothing: no offer at or below your price'],
+          ['Rests in the book', rest > 0n ? amt(rest) + ' ' + d.symbol + ' at ' + usd(v.p) : 'nothing'],
+          ['mUSDC needed', amt(sim.cash + (sim.tokens > 0n ? sim.fee : 0n) + ceilMul(rest, v.p))],
+          ['Taker fee (' + feeText() + ')', sim.tokens > 0n ? amt(sim.fee) + ' mUSDC' : 'none while resting']]
+      },
+      steps: async (c, v) => {
+        const ids = hintsFor(c.d, true, v.p).map((o) => o.id), cost = ceilMul(v.a, v.p)
+        return [await approval(c, c.usdc, c.f.book, cost + cost / 100n + 1n, 'mUSDC'), ['Placing a limit buy at ' + usd(v.p), c.book, 'limitBuy', [v.a, v.p, ids]]]
+      } },
+    { id: 'limitsell', title: 'Limit sell', btn: 'Sell', term: 'sell', otype: 'limit', fields: [F.usdc('p'), F.tok('a')],
+      why: marketOpen,
+      quote: (d, m, v) => {
+        if (v.p <= 0n) return null
+        const sim = bookMatch(false, v.a, BOOK_NO_CAP, v.p, d.lad, hintsFor(d, false, v.p))
+        const rest = v.a - sim.tokens >= U6 ? v.a - sim.tokens : 0n
+        return [['Limit price', usd(v.p)], ['Vs NAV', vsNav(v.p, d.navPerToken)],
+          ['Fills at once', sim.tokens > 0n ? amt(sim.tokens) + ' ' + d.symbol + ' at avg ' + usd((sim.cash * U6) / sim.tokens) : 'nothing: no bid at or above your price'],
+          ['Rests in the book', rest > 0n ? amt(rest) + ' ' + d.symbol + ' at ' + usd(v.p) : 'nothing'],
+          ['mUSDC if all of it fills', amt(sim.cash - (sim.tokens > 0n ? sim.fee : 0n) + (rest * v.p) / U6)],
+          ['Taker fee (' + feeText() + ')', sim.tokens > 0n ? amt(sim.fee) + ' mUSDC' : 'none while resting']]
+      },
+      steps: async (c, v) => {
+        const ids = hintsFor(c.d, false, v.p).map((o) => o.id)
+        return [await approval(c, c.token, c.f.book, v.a, c.d.symbol), ['Placing a limit sell at ' + usd(v.p), c.book, 'limitSell', [v.a, v.p, ids]]]
+      } },
+    { id: 'cancel', title: 'Cancel order', btn: 'Cancel', fields: [F.text('id')],
+      why: () => '',
+      steps: async (c, v) => [['Cancelling order #' + v.id, c.book, 'cancel', [BigInt(v.id)]]] },
     { id: 'subscribe', tab: 'pf', title: 'Follow-on', lead: 'New tokens from the selected fund at the higher of NAV and market price.', btn: 'Subscribe',
       fields: [F.tok('a')],
       show: (d) => d.followOnRemaining > 0n,
@@ -1285,11 +1409,11 @@
     { id: 'buyback', inline: true, title: 'Trigger the buyback-and-burn', btn: 'Trigger buyback', optional: true,
       fields: [F.usdc('a', 'empty = maximum')],
       show: (d) => d.saleClosed,
-      why: (d) => !d.saleClosed ? 'Opens with the market.' : d.marketPrice >= d.buybackTriggerPrice ? 'The market is not more than 10% below NAV.' :
+      why: (d) => !d.saleClosed ? 'Opens with the market.' : d.marketPrice > d.buybackTriggerPrice ? 'The market has not fallen to 10% below NAV.' :
         Number(d.lastBuyback) + Math.floor(state.year / 52) > now() ? 'Cooldown: ' + dur(Number(d.lastBuyback) + Math.floor(state.year / 52) - now()) + '.' :
           d.maxBuyback === 0n ? 'The vault holds no cash.' : '',
-      pre: (d, m, v) => v.a === null && d.saleClosed ? 'Empty sends ' + amt(buybackAmount(d)) + ' mUSDC: the 1% limit, or less where that would lift the price above NAV.' : '',
-      steps: async (c, v) => [['Triggering the buyback', c.fund, 'buyback', [v.a === null ? buybackAmount(c.d) : v.a]]] },
+      pre: (d, m, v) => v.a === null && d.saleClosed ? 'Empty sends ' + amt(d.maxBuyback) + ' mUSDC, the 1% limit. It buys the cheapest offers: holders\' sell orders below the ladder first.' : '',
+      steps: async (c, v) => [['Triggering the buyback', c.fund, 'buyback', [v.a === null ? c.d.maxBuyback : v.a, bookHints(true, c.d.orders, null).map((o) => o.id)]]] },
     { id: 'fee', inline: true, title: 'Mint the yearly management fee', btn: 'Mint fee tranche', fields: [],
       show: (d) => d.saleClosed,
       why: (d) => !d.saleClosed ? 'Starts when the sale closes.' : d.feeTranchesMinted >= 10n ? 'Lifetime cap of 10 tranches reached.' :
@@ -1337,8 +1461,11 @@
   const ACT = Object.fromEntries(ACTIONS.map((a) => [a.id, a]))
   // With a session key, trades go through the trading account; the key holds no funds.
   const SESSION_STEPS = {
-    swapbuy: async (c, v) => { const out = await c.pool.quoteUSDCForToken(v.a); return [['Buying in the pool via the trading account', c.acct, 'buyInPool', [state.selected, v.a, (out * 99n) / 100n]]] },
-    sell: async (c, v) => { const out = await c.pool.quoteTokenForUSDC(v.a); return [['Selling in the pool via the trading account', c.acct, 'sellInPool', [state.selected, v.a, (out * 99n) / 100n]]] },
+    swapbuy: async (c, v) => { const ids = hintsFor(c.d, true).map((o) => o.id), q = await c.book.quoteBuy(v.a, ids); return [['Buying in the order book via the trading account', c.acct, 'buyInBook', [state.selected, v.a, (q[0] * 99n) / 100n, ids]]] },
+    sell: async (c, v) => { const ids = hintsFor(c.d, false).map((o) => o.id), q = await c.book.quoteSell(v.a, ids); return [['Selling in the order book via the trading account', c.acct, 'sellInBook', [state.selected, v.a, (q[0] * 99n) / 100n, ids]]] },
+    limitbuy: async (c, v) => [['Placing a limit buy at ' + usd(v.p) + ' via the trading account', c.acct, 'limitBuyInBook', [state.selected, v.a, v.p, hintsFor(c.d, true, v.p).map((o) => o.id)]]],
+    limitsell: async (c, v) => [['Placing a limit sell at ' + usd(v.p) + ' via the trading account', c.acct, 'limitSellInBook', [state.selected, v.a, v.p, hintsFor(c.d, false, v.p).map((o) => o.id)]]],
+    cancel: async (c, v) => [['Cancelling order #' + v.id + ' via the trading account', c.acct, 'cancelInBook', [state.selected, BigInt(v.id)]]],
     buy: async (c, v) => [['Buying in the primary sale via the trading account', c.acct, 'buyPrimary', [state.selected, v.a]]],
     faucet: async (c) => [['Minting 100,000 test mUSDC to the trading account', c.usdc, 'mint', [c.account, 100000n * U6]]],
     mint: async (c, v) => [['Minting test mUSDC to the trading account', c.usdc, 'mint', [c.account, v.a]]]
@@ -1355,18 +1482,6 @@
       (f.type === 'amount' ? ' inputmode="decimal"' : '') + ' autocomplete="off" spellcheck="false">' +
       (f.unit ? '<span class="unit"' + (f.unit === 'token' ? ' data-unit="token">token' : '>' + f.unit) + '</span>' : '') + '</label>').join('')
   }
-  // Largest buyback within the 1% limit that leaves the pool price at or just below NAV.
-  // The contract reverts a buyback that ends above NAV; with a large vault the 1% limit alone can.
-  function buybackAmount(d) {
-    const T = d.reserveToken, U = d.reserveUSDC, cap = d.maxBuyback, lim = (d.navPerToken * 9999n) / 10000n
-    if (!T || !U || !cap) return cap
-    const after = (a) => { const inF = a * 9970n, out = (inF * T) / (U * 10000n + inF); return ((U + a) * U6) / (T - out) }
-    if (after(cap) <= lim) return cap
-    let lo = 0n, hi = cap
-    while (hi - lo > 1n) { const mid = (lo + hi) / 2n; if (after(mid) <= lim) lo = mid; else hi = mid }
-    return lo
-  }
-
   function actHtml(a, o) {
     o = o || {}
     const chips = a.chips ? '<div class="chips">' + a.chips.map((c, i) => '<button type="button" class="chip" data-chip="' + i + '">' + c.l + '</button>').join('') + '</div>' : ''
@@ -1377,16 +1492,17 @@
   }
   const ticks = '<input class="orange" type="range" min="0" max="100" step="1" value="0" aria-label="Share of available balance"><div class="oticks">' +
     [0, 25, 50, 75, 100].map((v) => '<button type="button" data-pct="' + v + '">' + v + ' %</button>').join('') + '</div>'
-  const orderForm = (id, label, unit) => '<div class="oform" data-a="' + id + '"><label class="ofield"><span>' + label + '</span><input data-k="a" inputmode="decimal" autocomplete="off" placeholder="0.00"><em' +
-    (unit ? '>' + unit : ' data-unit="token">token') + '</em></label>' + ticks + '<div class="oquote"></div><p class="qwarn why"></p><button class="ogo go ' + (id === 'sell' ? 's' : 'b') + '">' + (id === 'sell' ? 'Sell' : 'Buy') + ' <span data-unit="token">token</span></button></div>'
+  const ofield = (k, label, unit) => '<label class="ofield"><span>' + label + '</span><input data-k="' + k + '" inputmode="decimal" autocomplete="off" placeholder="0.00"><em' + (unit ? '>' + unit : ' data-unit="token">token') + '</em></label>'
+  const orderForm = (id, label, unit, priced) => '<div class="oform" data-a="' + id + '">' + (priced ? ofield('p', 'Limit price', 'mUSDC') : '') + ofield('a', label, unit) + ticks + '<div class="oquote"></div><p class="qwarn why"></p><button class="ogo go ' + (/sell/.test(id) ? 's' : 'b') + '">' + (/sell/.test(id) ? 'Sell' : 'Buy') + ' <span data-unit="token">token</span></button></div>'
 
   function buildActions(force) {
     const key = state.selected + '|' + (state.signer ? state.account : 'none')
     if (!force && key === state.actionsKey) return updateActions()
     state.actionsKey = key
     $('torder').innerHTML = '<div class="oside" role="group" aria-label="Side"><button class="b" data-side="buy">Buy</button><button class="s" data-side="sell">Sell</button></div>' +
-      '<div class="otype" role="group" aria-label="Order type"><button aria-pressed="true">Market</button></div>' +
+      '<div class="otype" role="group" aria-label="Order type"><button data-otype="market">Market</button><button data-otype="limit">Limit</button></div>' +
       '<div class="oav"><span>Available</span><span id="oav">–</span></div>' + orderForm('swapbuy', 'Spend', 'mUSDC') + orderForm('sell', 'Size', '') +
+      orderForm('limitbuy', 'Size', '', true) + orderForm('limitsell', 'Size', '', true) +
       '<div class="oacct"><div class="oh">Account</div><div id="oacct"></div><div data-a="faucet"><button class="oclaim go">Get 100,000 test mUSDC</button><p class="qwarn why"></p></div></div>'
     $('ipo').innerHTML = '<div class="oh">Primary sale</div><div id="ipoStatus"></div>' +
       '<div class="oform" data-a="buy">' + fieldsHtml(ACT.buy) + '<div class="chips">' + ACT.buy.chips.map((c, i) => '<button type="button" class="chip" data-chip="' + i + '">' + c.l + '</button>').join('') +
@@ -1403,6 +1519,7 @@
   function updateActions() {
     const d = state.detail, m = state.me
     document.querySelectorAll('#torder .oside button').forEach((b) => b.classList.toggle('on', b.dataset.side === state.side))
+    document.querySelectorAll('#torder .otype button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.otype === state.otype)))
     for (const row of document.querySelectorAll('[data-a]')) {
       const a = ACT[row.dataset.a]
       if (!a) continue
@@ -1411,7 +1528,7 @@
       else if (!state.signer) { why = a.why(d, null); if (!why) { why = 'Connect a wallet on ' + CFG.network + ' to send this.'; soft = true } }
       else why = (tkOn() && !SESSION_ONLY[a.id] && !SESSION_DIRECT[a.id] ? 'The session key can only trade: switch to MetaMask for this.' : '') ||
         (a.gp && m && !m.isGP ? 'Only the GP of this sub-fund can do this.' : '') || a.why(d, m)
-      if (a.term) row.hidden = a.term !== state.side
+      if (a.term) row.hidden = a.term !== state.side || (a.otype || 'market') !== state.otype
       else if (a.show && (row.classList.contains('card') || row.closest('.light'))) row.hidden = !!d && !a.show(d, m)
       const note = row.querySelector('.why')
       if (note) { if (note.textContent !== why) note.textContent = why; note.classList.toggle('soft', soft) }
@@ -1432,7 +1549,7 @@
       const av = $('oav'); if (av) av.textContent = m ? amt(available()) + ' ' + (state.side === 'buy' ? 'mUSDC' : d.symbol) : '–'
       const ac = $('oacct')
       if (ac) {
-        const html = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div><div class="qrow"><span>Value at pool price</span><span>$' +
+        const html = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div><div class="qrow"><span>Value at market price</span><span>$' +
           cmp(num(m.token) * num(d.marketPrice)) + '</span></div><div class="qrow"><span>Value at NAV</span><span>$' + cmp(num(m.token) * num(d.navPerToken)) + '</span></div>'
           : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to trade' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
         const full = html + signLine()
@@ -1484,7 +1601,7 @@
     const c = {
       account: state.account, f, d: state.detail,
       fund: new E.Contract(f.fund, ABI.fund, s), token: new E.Contract(f.token, ABI.erc20, s),
-      pool: new E.Contract(f.pool, ABI.pool, s), vesting: new E.Contract(f.vesting, ABI.vesting, s),
+      book: new E.Contract(f.book, ABI.book, s), vesting: new E.Contract(f.vesting, ABI.vesting, s),
       usdc: new E.Contract(CFG.usdc, ABI.erc20, s),
       acct: tkOn() ? new E.Contract(state.tk.acct, ABI.account, s) : null
     }
@@ -1544,6 +1661,7 @@
     const pane = t.closest('[data-pane]'); if (pane) { state.pane = pane.dataset.pane; if (state.detail) renderBook(); return }
     const tt = t.closest('[data-ttab]'); if (tt) { state.ttab = tt.dataset.ttab; if (state.detail) renderBottom(); return }
     const side = t.closest('[data-side]'); if (side) { state.side = side.dataset.side; updateActions(); return }
+    const ot = t.closest('[data-otype]'); if (ot) { state.otype = ot.dataset.otype; prefillLimit(); updateActions(); return }
     const row = t.closest('[data-a]')
     if (!row) return
     const a = ACT[row.dataset.a]
@@ -1561,8 +1679,21 @@
     }
     if (t.closest('.go')) runAction(a, row)
   })
+  // A limit form opens with the market price in its price field, as a starting point.
+  function prefillLimit() {
+    const d = state.detail
+    if (!d || !d.marketPrice) return
+    document.querySelectorAll('#torder [data-k="p"]').forEach((inp) => { if (!inp.value) inp.value = num(d.marketPrice).toFixed(4) })
+  }
   function setPct(row, p) {
-    const av = available()
+    let av = available()
+    if (row.dataset.a === 'limitbuy') {
+      // a limit buy is sized in tokens: what the available mUSDC buys at the limit price, fee included
+      prefillLimit()
+      let price = 0n
+      try { price = E.parseUnits(row.querySelector('[data-k="p"]').value.trim() || '0', D) } catch (e) { price = 0n }
+      av = price > 0n ? (((av * 10000n) / (10000n + BOOK_FEE_BPS)) * U6) / price : 0n
+    }
     row.querySelector('[data-k="a"]').value = av > 0n && p > 0 ? E.formatUnits((av * BigInt(p)) / 100n, D) : ''
     const r = row.querySelector('.orange'); if (r) r.value = p
     updateActions()

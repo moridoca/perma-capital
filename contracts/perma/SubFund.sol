@@ -2,33 +2,37 @@
 pragma solidity ^0.8.20;
 
 import "./FundToken.sol";
-import "./LiquidityPool.sol";
+import "./OrderBook.sol";
 import "./GPVesting.sol";
 
 interface IComponentDeployer {
     function deploy(string calldata name, string calldata symbol, address usdc, uint256 yearSeconds)
         external
-        returns (address token, address pool, address vesting);
+        returns (address token, address book, address vesting);
 }
 
 /// @title SubFund - one permanent-capital sub-fund under the umbrella
 /// @notice Issued once, never wound up. There are no capital calls, no
 ///         redemptions and no distributions: profits stay in the fund and
-///         raise NAV per token. Holders exit by selling in the pool.
+///         raise NAV per token. Holders exit by selling in the order book.
 ///
 ///         What the code enforces (no manager discretion):
 ///           - primary sale at a fixed $1.00, hard-capped
-///           - 5% of supply paired with sale cash as permanent, fund-owned liquidity
+///           - 5% of supply paired with sale cash as permanent, fund-owned liquidity,
+///             quoted in the order book in equal steps of 1% around NAV
 ///           - management fee paid in tokens: 2% of initial supply per year,
 ///             10-year lifetime cap, each tranche locked for one year
 ///           - buyback-and-burn that anyone can trigger when the market
-///             trades more than 10% below NAV
+///             has fallen to 10% below NAV, the bottom of the fund's ladder
 ///           - follow-on issuance only at or above NAV, so new money never dilutes holders
 ///           - token holders can replace the GP; unvested fee tokens are burned
 ///
 ///         What stays a trust assumption: the value of off-chain
 ///         investments is reported by the GP (investedValue).
-///         Cash and pool liquidity are read on-chain and cannot be misstated.
+///         Cash and the fund's liquidity in the book are read on-chain and
+///         cannot be misstated. Because the ladder is quoted around NAV, a
+///         wrong valuation moves the fund's own bids and asks: the most it
+///         can cost is the liquidity in the book, 5% of the fund.
 contract SubFund {
     uint256 private constant ONE = 1e6; // 1 token and $1.00, both 6 decimals
 
@@ -42,7 +46,7 @@ contract SubFund {
     uint256 public constant FEE_YEARS_CAP = 10;       // fee minting stops for good after 10 tranches
 
     // --- discount control ---
-    uint256 public constant BUYBACK_TRIGGER_BPS = 1000; // market price more than 10% below NAV
+    uint256 public constant BUYBACK_TRIGGER_BPS = 1000; // market price 10% below NAV: the ladder's lowest rung
     uint256 public constant BUYBACK_MAX_BPS = 100;      // at most 1% of vault cash per execution
 
     // --- governance ---
@@ -51,7 +55,7 @@ contract SubFund {
     string public name;
     IERC20Like public immutable usdc;
     FundToken public immutable token;
-    LiquidityPool public immutable pool;
+    OrderBook public immutable book;
     GPVesting public immutable vesting;
 
     /// @notice Length of one "year" in seconds. 365 days in production;
@@ -108,7 +112,7 @@ contract SubFund {
         _;
     }
 
-    /// @param components Helper that deploys token, pool and vesting for this
+    /// @param components Helper that deploys token, order book and vesting for this
     ///        fund. Keeping that bytecode out of this contract is what keeps
     ///        every contract below the 24 KB size limit (EIP-170).
     constructor(
@@ -126,10 +130,10 @@ contract SubFund {
         gp = gp_;
         YEAR = yearSeconds;
         VOTING_PERIOD = votingSeconds;
-        (address t, address p, address v) =
+        (address t, address b, address v) =
             IComponentDeployer(components).deploy(name_, symbol_, usdc_, yearSeconds);
         token = FundToken(t);
-        pool = LiquidityPool(p);
+        book = OrderBook(b);
         vesting = GPVesting(v);
     }
 
@@ -156,14 +160,15 @@ contract SubFund {
         require(msg.sender == gp || sold == SALE_CAP, "Fund: only GP before sell-out");
         saleClosed = true;
 
-        // Permanent fund-owned liquidity: equal token and cash value at $1.00.
-        // The fund has no function to withdraw it again.
+        // Permanent fund-owned liquidity: equal token and cash value at $1.00,
+        // placed on the book's ladder around NAV. The fund has no function
+        // to withdraw it again.
         uint256 liqTokens = sold / POL_DIVISOR;
         uint256 liqUSDC = (liqTokens * IPO_PRICE) / ONE;
         token.mint(address(this), liqTokens);
-        token.approve(address(pool), liqTokens);
-        usdc.approve(address(pool), liqUSDC);
-        pool.addLiquidity(liqTokens, liqUSDC);
+        token.approve(address(book), liqTokens);
+        usdc.approve(address(book), liqUSDC);
+        book.seed(liqTokens, liqUSDC);
 
         initialSupply = sold + liqTokens;
         lastFeeMint = block.timestamp;
@@ -206,26 +211,22 @@ contract SubFund {
         return usdc.balanceOf(address(this));
     }
 
-    /// @notice The fund's share of the pool: (tokens, mUSDC).
+    /// @notice What the fund owns on the book's ladder: (tokens, mUSDC).
     function ownedLiquidity() public view returns (uint256 tokens, uint256 cash) {
-        uint256 total = pool.totalShares();
-        if (total == 0) return (0, 0);
-        uint256 mine = pool.shares(address(this));
-        tokens = (pool.reserveToken() * mine) / total;
-        cash = (pool.reserveUSDC() * mine) / total;
+        return book.inventory();
     }
 
-    /// @notice Net assets = vault cash + fund-owned pool cash + reported investments.
+    /// @notice Net assets = vault cash + the fund's cash in the book + reported investments.
     function netAssets() public view returns (uint256) {
-        (, uint256 poolCash) = ownedLiquidity();
-        return vaultCash() + poolCash + investedValue;
+        (, uint256 bookCash) = ownedLiquidity();
+        return vaultCash() + bookCash + investedValue;
     }
 
-    /// @notice Tokens held by investors and the GP. Fund-owned tokens in the
-    ///         pool are treasury stock and do not count.
+    /// @notice Tokens held by investors and the GP. The fund's own tokens on
+    ///         the ladder are treasury stock and do not count.
     function outstandingSupply() public view returns (uint256) {
-        (uint256 poolTokens, ) = ownedLiquidity();
-        return token.totalSupply() - poolTokens;
+        (uint256 bookTokens, ) = ownedLiquidity();
+        return token.totalSupply() - bookTokens;
     }
 
     /// @notice NAV per token in mUSDC, 6 decimals (1_000000 = $1.00).
@@ -235,9 +236,10 @@ contract SubFund {
         return (netAssets() * ONE) / supply;
     }
 
-    /// @notice Pool price in mUSDC per token, 6 decimals.
+    /// @notice The ladder's price in mUSDC per token, 6 decimals: the middle
+    ///         between its best bid and best ask.
     function marketPrice() public view returns (uint256) {
-        return pool.spotPrice();
+        return book.spotPrice();
     }
 
     /// @notice Market price relative to NAV in basis points.
@@ -284,27 +286,30 @@ contract SubFund {
         return (vaultCash() * BUYBACK_MAX_BPS) / 10_000;
     }
 
-    /// @notice Anyone can make the fund buy its own tokens in the pool and
-    ///         burn them while the market trades more than 10% below NAV.
-    ///         Limited to 1% of vault cash per execution and one execution
-    ///         per "week". Buying below NAV never lowers NAV per token.
-    ///         Note: where the fund itself owns the pool, a holder selling
-    ///         into the pool already is a buyback at the market price. This
-    ///         function then moves vault cash into the pool and lifts the quote.
-    function buyback(uint256 usdcAmount) external {
+    /// @notice Anyone can make the fund buy its own tokens in the book and
+    ///         burn them once the market has fallen to 10% below NAV. That is
+    ///         the bottom of the ladder: its bids are used up. Limited to 1%
+    ///         of vault cash per execution and one execution per "week".
+    ///         Buying below NAV never lowers NAV per token.
+    ///         Bought from holders' sell orders, this is a buyback at a
+    ///         discount. Bought from the ladder, it turns treasury tokens into
+    ///         fresh bids: vault cash moves onto the lowest rung.
+    /// @param ids Resting sell orders to buy from, cheapest first (may be empty).
+    function buyback(uint256 usdcAmount, uint256[] calldata ids) external {
         require(saleClosed, "Fund: sale open");
         require(block.timestamp >= lastBuyback + YEAR / 52, "Fund: buyback cooldown");
         uint256 navBefore = navPerToken();
-        require(marketPrice() < buybackTriggerPrice(), "Fund: discount below trigger");
+        require(marketPrice() <= buybackTriggerPrice(), "Fund: discount below trigger");
         require(usdcAmount > 0 && usdcAmount <= maxBuyback(), "Fund: amount above limit");
         lastBuyback = block.timestamp;
 
-        usdc.approve(address(pool), usdcAmount);
-        uint256 bought = pool.swapUSDCForToken(usdcAmount, 0);
+        usdc.approve(address(book), usdcAmount);
+        (uint256 bought, uint256 spent) = book.buy(usdcAmount, 0, ids);
+        usdc.approve(address(book), 0);
         token.burn(bought);
 
         require(marketPrice() <= navBefore, "Fund: would push price above NAV");
-        emit BuybackExecuted(msg.sender, usdcAmount, bought, marketPrice());
+        emit BuybackExecuted(msg.sender, spent, bought, marketPrice());
         _emitNAV();
     }
 
@@ -344,11 +349,14 @@ contract SubFund {
     // ==================================================================
 
     /// @notice Supply that is allowed to vote: everything except unvested
-    ///         fee tokens, tokens in the pool and the GP's own wallet.
+    ///         fee tokens, the fund's own tokens on the ladder and the GP's
+    ///         own wallet. Holders' tokens in open sell orders still count:
+    ///         they can be taken out of the book and voted.
     function eligibleSupply() public view returns (uint256) {
+        (uint256 bookTokens, ) = ownedLiquidity();
         return token.totalSupply()
             - token.balanceOf(address(vesting))
-            - token.balanceOf(address(pool))
+            - bookTokens
             - token.balanceOf(gp);
     }
 

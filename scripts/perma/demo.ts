@@ -7,8 +7,8 @@
 //   3. Right-click this file -> Run. Watch the terminal.
 //
 // The script plays the full life of one sub-fund in about three minutes:
-// launch -> primary sale -> market opens -> capital deployed -> sell-off and
-// rule-based buyback -> revaluation -> follow-on at NAV -> management fee and
+// launch -> primary sale -> market opens -> capital deployed -> limit order
+// next to the fund's ladder -> sell-off and rule-based buyback -> revaluation -> follow-on at NAV -> management fee and
 // vesting -> token holders replace the GP -> exit proceeds compound.
 
 import { ethers } from 'ethers'
@@ -90,11 +90,11 @@ const artifact = async (name: string) => {
     const o = await umbrella.overview(0)
     const fund = await attach('SubFund', o.fund)
     const token = await attach('FundToken', o.token)
-    const pool = await attach('LiquidityPool', o.pool)
+    const book = await attach('OrderBook', o.book)
     const vesting = await attach('GPVesting', o.vesting)
     console.log('  Perma Buyout  fund ' + o.fund)
     console.log('                token ' + o.token)
-    console.log('                pool ' + o.pool)
+    console.log('                order book ' + o.book)
     console.log('                vesting ' + o.vesting)
 
     const status = async (label: string) => {
@@ -112,8 +112,8 @@ const artifact = async (name: string) => {
     for (const [who, amount] of [[alice, 6000000], [bob, 3500000], [carol, 1000000]] as any[]) {
       await send(usdc.mint(await A(who), units(amount)))
       await send(usdc.connect(who).approve(o.fund, MAX))
-      await send(usdc.connect(who).approve(o.pool, MAX))
-      await send(token.connect(who).approve(o.pool, MAX))
+      await send(usdc.connect(who).approve(o.book, MAX))
+      await send(token.connect(who).approve(o.book, MAX))
       await send(token.connect(who).approve(o.fund, MAX))
     }
     await send(fund.connect(alice).buy(units(6000000)))
@@ -123,21 +123,35 @@ const artifact = async (name: string) => {
     await mustFail('nobody but the fund can mint tokens', token.connect(alice), 'mint', [await A(alice), 1])
     await send(fund.connect(carol).closeSale())
     const closedAt = await now()
-    console.log('  sale closed; 500,000 pBUY + 500,000 mUSDC locked as fund-owned liquidity')
+    console.log('  sale closed; 500,000 pBUY + 500,000 mUSDC locked as fund-owned liquidity,')
+    console.log('  quoted in the order book in ten 1% steps on each side of NAV')
     await status('market open')
 
     console.log('=== 3. Capital goes to work ===')
     await send(fund.deployCapital(await A(portfolioCo), units(6000000), 'Acquisition: PortCo A'))
     await status('6.0M invested at cost')
 
-    console.log('=== 4. Sell-off, discount, rule-based buyback ===')
-    await mustFail('buyback without a discount', fund, 'buyback', [units(1000)])
-    await send(pool.connect(bob).swapTokenForUSDC(units(100000), 0))
-    await status('Bob sold 100,000 in the pool')
-    await send(fund.connect(carol).buyback(units(30000)))
-    await status('anyone triggered a 30,000 buyback')
+    console.log('=== 4. Order book: a limit order of a holder next to the ladder of the fund ===')
+    await send(book.connect(alice).limitSell(units(100000), units(1.005), []))
+    console.log('  Alice offers 100,000 pBUY at $1.005, inside the ladder (its first ask is NAV +1%)')
+    const open = await book.openOrders()
+    const quote = await book.quoteBuy(units(150000), [...open.ids])
+    await send(book.connect(carol).buy(units(150000), quote.tokenOut, [...open.ids]))
+    console.log('  Carol bought ' + fmt(quote.tokenOut) + ' pBUY for ' + fmt(quote.usdcSpent) + ' mUSDC: Alice first at $1.005, then the ladder at $1.01')
+    await mustFail('cancelling a filled order', book.connect(alice), 'cancel', [0])
+    await status('after the first trades')
 
-    console.log('=== 5. Revaluation and follow-on at NAV ===')
+    console.log('=== 5. Sell-off, discount, rule-based buyback ===')
+    await mustFail('buyback without a discount', fund, 'buyback', [units(1000), []])
+    const bobBefore = await token.balanceOf(await A(bob))
+    await send(book.connect(bob).sell(units(800000), 0, []))
+    const bobAfter = await token.balanceOf(await A(bob))
+    console.log('  Bob sold ' + fmt(v6 ? bobBefore - bobAfter : bobBefore.sub(bobAfter)) + ' pBUY: every bid of the ladder down to NAV -10% is used up')
+    await status('market at the bottom of the ladder')
+    await send(fund.connect(carol).buyback(units(30000), []))
+    await status('anyone triggered a 30,000 buyback: vault cash becomes fresh bids')
+
+    console.log('=== 6. Revaluation and follow-on at NAV ===')
     await send(fund.markInvestments(units(7500000), 'Year-end valuation'))
     await status('portfolio marked 6.0M -> 7.5M')
     await send(fund.openFollowOn(units(500000)))
@@ -145,7 +159,7 @@ const artifact = async (name: string) => {
     await send(fund.connect(carol).subscribe(units(100000), price))
     await status('Carol subscribed 100,000 at ' + fmt(price))
 
-    console.log('=== 6. Management fee: 2% in tokens, locked for one year ===')
+    console.log('=== 7. Management fee: 2% in tokens, locked for one year ===')
     await mustFail('fee before the year is over', fund, 'mintManagementFee', [])
     await waitUntil(closedAt + YEAR_SECONDS, 'year 1 passes')
     await send(fund.connect(bob).mintManagementFee())
@@ -158,18 +172,18 @@ const artifact = async (name: string) => {
     console.log('  GP claimed tranche 1: ' + fmt(await token.balanceOf(await A(gp))) + ' pBUY; tranche 2 still locked: ' + fmt(await vesting.unvested()))
     await status('year 2 fee minted')
 
-    console.log('=== 7. Token holders replace the GP ===')
+    console.log('=== 8. Token holders replace the GP ===')
     await send(fund.connect(bob).proposeRemoveGP(await A(newGP)))
     await mustFail('GP voting on his own removal', fund, 'vote', [1])
-    await send(fund.connect(alice).vote(units(6000000)))
-    console.log('  Alice locked 6,000,000 votes; eligible supply ' + fmt(await fund.eligibleSupply()))
+    await send(fund.connect(alice).vote(units(5900000)))
+    console.log('  Alice locked 5,900,000 votes; eligible supply ' + fmt(await fund.eligibleSupply()))
     await send(fund.connect(carol).executeRemoveGP())
     await send(fund.connect(alice).withdrawVotes(1))
     console.log('  GP is now ' + (await fund.gp()) + '; unvested fee tokens burned')
     await mustFail('old GP touching the portfolio', fund, 'markInvestments', [1, 'x'])
     await status('after GP change')
 
-    console.log('=== 8. Exit: proceeds stay in the fund and compound ===')
+    console.log('=== 9. Exit: proceeds stay in the fund and compound ===')
     await send(usdc.mint(await A(newGP), units(9000000)))
     await send(usdc.connect(newGP).approve(o.fund, MAX))
     await send(fund.connect(newGP).returnProceeds(units(9000000), 0))

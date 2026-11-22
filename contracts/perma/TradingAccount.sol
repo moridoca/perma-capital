@@ -8,14 +8,17 @@ interface IUmbrellaForAccount {
 
 interface ISubFundForAccount {
     function token() external view returns (address);
-    function pool() external view returns (address);
+    function book() external view returns (address);
     function navPerToken() external view returns (uint256);
     function buy(uint256 tokenAmount) external;
 }
 
-interface IPoolForAccount {
-    function swapUSDCForToken(uint256 usdcIn, uint256 minTokenOut) external returns (uint256);
-    function swapTokenForUSDC(uint256 tokenIn, uint256 minUSDCOut) external returns (uint256);
+interface IBookForAccount {
+    function buy(uint256 usdcIn, uint256 minTokenOut, uint256[] calldata ids) external returns (uint256 tokenOut, uint256 usdcSpent);
+    function sell(uint256 tokenIn, uint256 minUSDCOut, uint256[] calldata ids) external returns (uint256 usdcOut, uint256 tokenSold);
+    function limitBuy(uint256 tokenAmount, uint256 price, uint256[] calldata ids) external returns (uint256 id, uint256 filled);
+    function limitSell(uint256 tokenAmount, uint256 price, uint256[] calldata ids) external returns (uint256 id, uint256 filled);
+    function cancel(uint256 id) external;
 }
 
 interface IERC20ForAccount {
@@ -29,12 +32,15 @@ interface IERC20ForAccount {
 ///         so orders go out without a wallet pop-up, like an agent key on Hyperliquid.
 ///
 ///         What a session key can do:
-///           - buy and sell in the pools of this umbrella's sub-funds, and buy in a
-///             primary sale - nothing else, no other contract, no other token
+///           - buy and sell in the order books of this umbrella's sub-funds, with
+///             market and limit orders, and buy in a primary sale - nothing else,
+///             no other contract, no other token
 ///           - only until its expiry (at most 30 days ahead)
 ///           - only up to a volume cap in mUSDC (buys at cost, sells at NAV)
 ///           - only at prices the owner allows: buys at most maxPremiumBps above NAV,
-///             sells at least maxDiscountBps below NAV, checked after the trade
+///             sells at least maxDiscountBps below NAV. Market orders are checked
+///             after the trade, limit orders by their limit price (the 0.07% taker
+///             fee on the part that fills at once comes on top)
 ///           - send funds back to the owner, never to anyone else
 ///
 ///         A stolen session key can therefore lose at most what bad trades within
@@ -61,6 +67,8 @@ contract TradingAccount {
     event SessionStarted(address indexed key, uint64 expiry, uint128 volumeCap, uint16 maxPremiumBps, uint16 maxDiscountBps);
     event SessionEnded(address indexed key, address by);
     event Traded(address indexed by, uint256 indexed fundIndex, bool buy, uint256 usdcAmount, uint256 tokenAmount);
+    event LimitOrder(address indexed by, uint256 indexed fundIndex, bool buy, uint256 tokenAmount, uint256 price, uint256 orderId, uint256 filled);
+    event OrderCancelled(address indexed by, uint256 indexed fundIndex, uint256 orderId);
     event Withdrawn(address indexed token, uint256 amount, address by);
 
     modifier onlyOwner() {
@@ -136,31 +144,94 @@ contract TradingAccount {
     }
 
     // ------------------------------------------------------------------
-    // Trading: only the pools and primary sales of this umbrella
+    // Trading: only the order books and primary sales of this umbrella
     // ------------------------------------------------------------------
 
-    function buyInPool(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut) external nonReentrant returns (uint256 tokenOut) {
+    /// @notice Market buy for at most `usdcIn`, fee included.
+    /// @param ids Resting sell orders to trade against, cheapest first (may be empty).
+    function buyInBook(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut, uint256[] calldata ids)
+        external
+        nonReentrant
+        returns (uint256 tokenOut)
+    {
         ISubFundForAccount fund = ISubFundForAccount(umbrella.subFunds(fundIndex));
         (uint256 maxPremiumBps, ) = _authorize(usdcIn);
         uint256 nav = fund.navPerToken();
-        address pool = fund.pool();
-        require(usdc.approve(pool, usdcIn), "Account: approve failed");
-        tokenOut = IPoolForAccount(pool).swapUSDCForToken(usdcIn, minTokenOut);
+        address book = fund.book();
+        require(usdc.approve(book, usdcIn), "Account: approve failed");
+        uint256 spent;
+        (tokenOut, spent) = IBookForAccount(book).buy(usdcIn, minTokenOut, ids);
+        require(usdc.approve(book, 0), "Account: approve failed");
         // Average price paid must not exceed NAV plus the allowed premium.
-        require(tokenOut > 0 && usdcIn * ONE * 10_000 <= nav * (10_000 + maxPremiumBps) * tokenOut, "Account: price above the session's limit");
-        emit Traded(msg.sender, fundIndex, true, usdcIn, tokenOut);
+        require(tokenOut > 0 && spent * ONE * 10_000 <= nav * (10_000 + maxPremiumBps) * tokenOut, "Account: price above the session's limit");
+        emit Traded(msg.sender, fundIndex, true, spent, tokenOut);
     }
 
-    function sellInPool(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut) external nonReentrant returns (uint256 usdcOut) {
+    /// @notice Market sell of up to `tokenIn` tokens.
+    /// @param ids Resting buy orders to trade against, highest first (may be empty).
+    function sellInBook(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut, uint256[] calldata ids)
+        external
+        nonReentrant
+        returns (uint256 usdcOut)
+    {
         ISubFundForAccount fund = ISubFundForAccount(umbrella.subFunds(fundIndex));
         uint256 nav = fund.navPerToken();
         (, uint256 maxDiscountBps) = _authorize((tokenIn * nav) / ONE);
-        address pool = fund.pool();
-        require(IERC20ForAccount(fund.token()).approve(pool, tokenIn), "Account: approve failed");
-        usdcOut = IPoolForAccount(pool).swapTokenForUSDC(tokenIn, minUSDCOut);
+        address book = fund.book();
+        IERC20ForAccount token = IERC20ForAccount(fund.token());
+        require(token.approve(book, tokenIn), "Account: approve failed");
+        uint256 sold;
+        (usdcOut, sold) = IBookForAccount(book).sell(tokenIn, minUSDCOut, ids);
+        require(token.approve(book, 0), "Account: approve failed");
         // Average price received must not fall below NAV minus the allowed discount.
-        require(usdcOut * ONE * 10_000 >= nav * (10_000 - maxDiscountBps) * tokenIn, "Account: price below the session's limit");
-        emit Traded(msg.sender, fundIndex, false, usdcOut, tokenIn);
+        require(usdcOut * ONE * 10_000 >= nav * (10_000 - maxDiscountBps) * sold, "Account: price below the session's limit");
+        emit Traded(msg.sender, fundIndex, false, usdcOut, sold);
+    }
+
+    /// @notice Limit buy: `tokenAmount` at `price` or better. What the book offers
+    ///         at or below the price is bought at once, the rest waits in the book.
+    function limitBuyInBook(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] calldata ids)
+        external
+        nonReentrant
+        returns (uint256 id, uint256 filled)
+    {
+        ISubFundForAccount fund = ISubFundForAccount(umbrella.subFunds(fundIndex));
+        uint256 cost = (tokenAmount * price + ONE - 1) / ONE;
+        (uint256 maxPremiumBps, ) = _authorize(cost);
+        require(price * 10_000 <= fund.navPerToken() * (10_000 + maxPremiumBps), "Account: price above the session's limit");
+        address book = fund.book();
+        // room for the taker fee on the part that fills at once
+        require(usdc.approve(book, cost + cost / 100 + 1), "Account: approve failed");
+        (id, filled) = IBookForAccount(book).limitBuy(tokenAmount, price, ids);
+        require(usdc.approve(book, 0), "Account: approve failed");
+        emit LimitOrder(msg.sender, fundIndex, true, tokenAmount, price, id, filled);
+    }
+
+    /// @notice Limit sell: `tokenAmount` at `price` or better. What the book bids
+    ///         at or above the price is sold at once, the rest waits in the book.
+    function limitSellInBook(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] calldata ids)
+        external
+        nonReentrant
+        returns (uint256 id, uint256 filled)
+    {
+        ISubFundForAccount fund = ISubFundForAccount(umbrella.subFunds(fundIndex));
+        uint256 nav = fund.navPerToken();
+        (, uint256 maxDiscountBps) = _authorize((tokenAmount * nav) / ONE);
+        require(price * 10_000 >= nav * (10_000 - maxDiscountBps), "Account: price below the session's limit");
+        address book = fund.book();
+        IERC20ForAccount token = IERC20ForAccount(fund.token());
+        require(token.approve(book, tokenAmount), "Account: approve failed");
+        (id, filled) = IBookForAccount(book).limitSell(tokenAmount, price, ids);
+        require(token.approve(book, 0), "Account: approve failed");
+        emit LimitOrder(msg.sender, fundIndex, false, tokenAmount, price, id, filled);
+    }
+
+    /// @notice Take one of this account's orders out of the book. The escrow comes
+    ///         back to this account. The owner and any active session key may call this.
+    function cancelInBook(uint256 fundIndex, uint256 orderId) external nonReentrant {
+        if (msg.sender != owner) require(sessions[msg.sender].expiry > block.timestamp, "Account: not allowed");
+        IBookForAccount(ISubFundForAccount(umbrella.subFunds(fundIndex)).book()).cancel(orderId);
+        emit OrderCancelled(msg.sender, fundIndex, orderId);
     }
 
     /// @notice Primary sale at the fixed $1.00 issue price.

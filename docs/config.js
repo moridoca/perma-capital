@@ -28,7 +28,7 @@ window.PERMA_NETWORKS = {
     // sent to each new session key.
     // TradingAccountFactory, deployed 22 Nov 2026 (block 12,185,219).
     tradingAccounts: '0x8Da83E34460378F94f158C38697c7C93B75E51D4',
-    // A pool trade costs well under 0.00003 ETH at these fees, so 0.0005 lasts a demo.
+    // A trade costs well under 0.00003 ETH at these fees, so 0.0005 lasts a demo.
     tkGas: '0.0005',
     tkLow: '0.00005',
     addChain: null

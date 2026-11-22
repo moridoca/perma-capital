@@ -1,0 +1,13 @@
+{
+  "name": "perma-capital-tests",
+  "private": true,
+  "description": "Compiles contracts/perma and runs the order book tests on a local chain.",
+  "scripts": {
+    "test": "node compile.js && node book.test.js"
+  },
+  "dependencies": {
+    "ethers": "6.13.4",
+    "ganache": "7.9.2",
+    "solc": "0.8.28"
+  }
+}

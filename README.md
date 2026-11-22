@@ -30,7 +30,7 @@ separate sub-funds that are issued once and never wound up. University prototype
 | Perma Agriculture (pAGR) | `0x6D3494e3ab8B6819A6322d4a05D5c66F08cA12BD` |
 
 Demo clock: one "year" is 300 seconds, a GP-removal vote stays open for 180 seconds.
-Token, pool and vesting addresses are in `scripts/perma/sepolia-deployment.json`.
+Token, order book and vesting addresses are in `scripts/perma/sepolia-deployment.json`.
 
 ## The dashboard
 
@@ -44,7 +44,7 @@ selector, five sections, and a tab bar on phones.
 
 | Section | What it shows |
 |---|---|
-| Trade | The trading terminal of the selected fund: price and NAV, candles from on-chain trades, the depth of the pool, the trade tape, order entry with a quote, balances, trade history, treasury. While a fund is still in its primary sale, the order column holds the sale and the chart shows its progress |
+| Trade | The trading terminal of the selected fund: price and NAV, candles from on-chain trades, the order book, the trade tape, market and limit orders with a quote, open orders, balances, trade history, treasury. While a fund is still in its primary sale, the order column holds the sale and the chart shows its progress |
 | Funds | Every sub-fund under the umbrella. For the selected one: balance sheet, the rules the code enforces with their status right now, and what only the manager can do |
 | Reports | A fund report built from chain data: statement of net assets, capital account since launch, investments and valuations, manager fee, your position, event log, contract addresses |
 | Portfolio | The connected wallet: account value, holdings across all funds at market and at NAV, test mUSDC |
@@ -56,9 +56,10 @@ that it would also hold for real money (`contracts/perma/TradingAccount.sol`):
 - Your funds sit in a **trading account**, a contract that only your wallet owns. One
   MetaMask confirmation creates it and starts a session.
 - A **session key** created in the browser signs orders for that account. It can only buy
-  and sell in this umbrella's pools and primary sales, only until its expiry (at most 30
+  and sell in this umbrella's order books (market and limit orders) and primary sales, only until its expiry (at most 30
   days), only up to a volume cap, and only at prices the owner allows around NAV (default:
-  buy at most 10% above NAV, sell at least 20% below NAV, checked after each trade).
+  buy at most 10% above NAV, sell at least 20% below NAV; market orders are checked after
+  the trade, limit orders by their limit price).
 - It can send funds back to the owner and nowhere else. It never holds funds itself,
   only a little gas, which comes along in the same confirmation.
 - The owner can end a session at any time; each new session gets a new key.
@@ -69,8 +70,11 @@ GP actions and governance still go through MetaMask. The contract is a prototype
 
 What the page does not pretend:
 
-- **A pool has no order book.** The depth panel shows how much the pool trades before its
-  price reaches each level, which is what an order book would tell you.
+- **The book has no matching engine.** A taker names the resting orders it trades against,
+  best price first, and the contract takes the better of order and ladder rung at every
+  step. The dashboard does this for you. A resting order is only filled when someone takes
+  it, so after a NAV change a holder's order can sit on the wrong side of the ladder until
+  a taker picks it up.
 - **There are no company-level statements on-chain.** The contracts hold one number for the
   whole portfolio and a memo per transaction, so the report shows exactly that. Invested
   value is flagged as GP-reported wherever it appears.
@@ -93,10 +97,12 @@ The numbers are from a run of exactly these steps on a local chain.
 | 2 | Trade: primary sale, 1,000,000 | 1,000,000 pBUY at $1.00 |
 | 3 | Trade: close the sale, open the market (GP) | Market opens at $1.00; 52,632 pBUY + 52,632 mUSDC become fund-owned liquidity |
 | 4 | Funds, Manager: deploy capital, 600,000 | NAV stays $1.00; vault cash 347,368 |
-| 5 | Trade: sell 5,000 | Market $0.8342, discount 16.6%; the depth panel shows the buyback as triggered |
-| 6 | Funds, Rules: trigger the buyback (empty = maximum) | 3,474 mUSDC spent; market $0.9589, discount 4.1% |
-| 7 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1512; the discount widens to 16.7% and the buyback is triggered again |
-| 8 | Funds, Rules, after one demo year: mint the fee tranche | 2% of supply in new tokens, locked in vesting |
+| 5 | Trade: buy for 5,000 mUSDC | 4,947 pBUY at an average of $1.0107: the first rung of the ladder, NAV +1%, plus the 0.07% fee. Market $1.0101 |
+| 6 | Trade: Limit, sell 10,000 at 1.0250 | Rests in the book between the ladder's rungs, marked "you"; listed under Open orders |
+| 7 | Trade: Market, sell 60,000 | Fills all ten bids of the ladder at an average of $0.9494. Market $0.9029, NAV $1.0033, discount 10.0%: buyback triggered |
+| 8 | Funds, Rules: trigger the buyback (empty = maximum) | 3,474 mUSDC from the vault buy 3,845 pBUY off the lowest rung and burn them; the cash now bids there |
+| 9 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1620. Every rung moves with it, the market to $1.0458. The limit order at $1.0250 keeps its price and is now the cheapest offer in the book |
+| 10 | Funds, Rules, after one demo year: mint the fee tranche | 2% of supply in new tokens, locked in vesting |
 
 ### Variant: sell out the whole sale first
 
@@ -108,13 +114,12 @@ the GP) can close the sale. Numbers from a local run with one non-GP wallet:
 | 1 | Portfolio: get test mUSDC, 9,500,000 | Wallet funded |
 | 2 | Trade: primary sale, 9,500,000 | Sale sold out; the close button opens for every wallet |
 | 3 | Trade: close the sale, open the market | 500,000 pBUY + 500,000 mUSDC become fund-owned liquidity; vault cash 9,000,000; NAV and price $1.00 |
-| 4 | Trade: sell 30,000 | Market $0.8901, NAV $1.0002, discount 11.0%: buyback triggered |
-| 5 | Funds, Rules: trigger the buyback, field empty | 28,328 mUSDC, price back to $1.0001 |
+| 4 | Trade: sell 600,000 | The book takes 529,590 pBUY at an average of $0.9435, the rest stays in the wallet. Market $0.9030, NAV $1.0033, discount 10.0%: buyback triggered |
+| 5 | Funds, Rules: trigger the buyback, field empty | 90,004 mUSDC (1% of vault cash) buy and burn 99,118 pBUY; market up one rung to $0.9130 |
 
-The pool is deeper here (500,000 instead of 52,632 tokens), so it takes a larger sale to
-move the price. In step 5 the 1% limit would be 90,000 mUSDC, but the contract refuses
-any buyback that ends above NAV. With the field empty, the dashboard therefore sends the
-largest amount that stays at NAV.
+The ladder is deeper here: 50,000 mUSDC on each bid rung instead of 5,263, so it takes a
+larger sale to reach the bottom. The buyback buys at the lowest prices on offer, which are
+never above NAV once the market sits at the bottom of the ladder.
 
 The contract does not force a sell-out: the GP can still close early once anything is
 sold. Enforcing it would mean changing `closeSale` and deploying again.

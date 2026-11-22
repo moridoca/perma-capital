@@ -132,13 +132,13 @@ const artifact = async (name: string) => {
     }
     const count = Number(await umbrella.subFundCount())
     for (let i = 0; i < count; i++) {
-      // overview returns: name, fund, token, pool, vesting, navPerToken, marketPrice, premiumBps, netAssets
+      // overview returns: name, fund, token, book, vesting, navPerToken, marketPrice, premiumBps, netAssets
       const o = await umbrella.overview(i)
-      out.subFunds.push({ name: o[0], fund: o[1], token: o[2], pool: o[3], vesting: o[4] })
+      out.subFunds.push({ name: o[0], fund: o[1], token: o[2], book: o[3], vesting: o[4] })
       console.log('  ' + o[0])
       console.log('      fund    ' + o[1])
       console.log('      token   ' + o[2])
-      console.log('      pool    ' + o[3])
+      console.log('      book    ' + o[3])
       console.log('      vesting ' + o[4])
     }
 

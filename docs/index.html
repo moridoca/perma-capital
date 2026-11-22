@@ -19,7 +19,7 @@
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('vendor/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 600; font-display: swap; src: url('vendor/fonts/jetbrains-mono-latin-600-normal.woff2') format('woff2'); }
 </style>
-<link rel="stylesheet" href="perma.css?v=4">
+<link rel="stylesheet" href="perma.css?v=5">
 <style>
 /* Additions to the PERMA design system for the live Sepolia dashboard. */
 html { -webkit-text-size-adjust: 100%; }
@@ -138,7 +138,7 @@ main > section, .view { display: flex; flex-direction: column; gap: 22px; min-wi
 
     <!-- Govern -->
     <section data-view="govern" hidden>
-      <div class="sec"><h1>Govern</h1><p class="lead">Token holders can replace the manager of a sub-fund. Yes votes are locked until the vote ends; the GP's own tokens, pool tokens and unvested fee tokens do not count.</p></div>
+      <div class="sec"><h1>Govern</h1><p class="lead">Token holders can replace the manager of a sub-fund. Yes votes are locked until the vote ends; the GP's own tokens, the fund's own tokens in the order book and unvested fee tokens do not count.</p></div>
       <div id="gov" class="view"></div>
       <div id="act-govern" class="sec" style="gap:14px"></div>
       <div id="gov2" class="view"></div>
@@ -150,7 +150,7 @@ main > section, .view { display: flex; flex-direction: column; gap: 22px; min-wi
 <nav class="tabs" aria-label="Main sections"><div class="in" id="tabs" style="grid-template-columns:repeat(5,1fr)"></div></nav>
 
 <script src="vendor/ethers.umd.min.js"></script>
-<script src="config.js?v=14"></script>
-<script src="app.js?v=14"></script>
+<script src="config.js?v=15"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>

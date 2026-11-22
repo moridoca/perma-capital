@@ -34,7 +34,7 @@ contract UmbrellaFactory {
         string symbol,
         address fund,
         address token,
-        address pool,
+        address book,
         address vesting
     );
 
@@ -57,7 +57,7 @@ contract UmbrellaFactory {
             symbol,
             address(fund),
             address(fund.token()),
-            address(fund.pool()),
+            address(fund.book()),
             address(fund.vesting())
         );
     }
@@ -74,7 +74,7 @@ contract UmbrellaFactory {
             string memory name,
             address fund,
             address token,
-            address pool,
+            address book,
             address vesting,
             uint256 navPerToken,
             uint256 marketPrice,
@@ -87,7 +87,7 @@ contract UmbrellaFactory {
             f.name(),
             address(f),
             address(f.token()),
-            address(f.pool()),
+            address(f.book()),
             address(f.vesting()),
             f.navPerToken(),
             f.marketPrice(),
