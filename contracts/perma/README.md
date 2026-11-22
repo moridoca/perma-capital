@@ -12,7 +12,7 @@ Prototype for the Remix VM and testnets. mUSDC is play money.
 | File | Role |
 |---|---|
 | UmbrellaFactory.sol | The umbrella. Launches sub-funds and lists them. One call, overview(i), returns addresses, NAV, market price and premium/discount. |
-| SubFund.sol | One sub-fund: primary sale, vault, NAV, fee, buyback, follow-on issuance, GP removal vote. |
+| SubFund.sol | One sub-fund: primary sale, vault, NAV, fee, buyback, issuance vote, GP removal vote. |
 | FundToken.sol | The sub-fund's share token. Freely transferable ERC-20; only the sub-fund can mint. |
 | OrderBook.sol | Secondary market. Below NAV the fund's cash on a ladder of 50 bid rungs in 0.2% steps, each reselling 0.1% higher; above NAV new issuance at NAV +0.2%; plus holders' limit orders. 0.07% taker fee, paid to the fund. |
 | GPVesting.sol | Holds the manager's fee tokens until they vest. |
