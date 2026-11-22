@@ -9,7 +9,7 @@
   "components": "0x53402325d9d534EF22D2A2cD7DD63830d7c0D67c",
   "fundDeployer": "0xaCAE8Bda0977E1C98ADE3C11dB3efc3db0CbE5D4",
   "umbrella": "0x6a45Fd87609163Fe1BB19a5393ABf974D97ddC00",
-  "tradingAccounts": "0xE6e2Eb4b65f48d7aB473fe70e5f07eB98Af54d37",
+  "tradingAccounts": "0xfB32e73a3dE3F0e3c057695D18cf6f58cAC57a6a",
   "vaults": "0x4A171285495bB9AE8b9f3E004b202205647a1a73",
   "vaultLockSeconds": 120,
   "subFunds": [

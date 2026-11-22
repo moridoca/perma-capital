@@ -58,7 +58,7 @@ window.PERMA_NETWORKS = {
     // Arbitrum ignores the tip and charges only the base fee (0.02 gwei on 21 Nov 2026).
     // The cap only has to stay above it; a lower cap means less gas has to sit in the trading key.
     fees: { priorityGwei: '0', maxGwei: '0.2' },
-    tradingAccounts: '0xE6e2Eb4b65f48d7aB473fe70e5f07eB98Af54d37',
+    tradingAccounts: '0xfB32e73a3dE3F0e3c057695D18cf6f58cAC57a6a',
     // VaultFactory; deposits lock for 120 seconds here.
     vaults: '0x4A171285495bB9AE8b9f3E004b202205647a1a73',
     tkGas: '0.002',

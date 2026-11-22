@@ -30,7 +30,7 @@ the network the dashboard opens with.
 |---|---|
 | UmbrellaFactory | `0x6a45Fd87609163Fe1BB19a5393ABf974D97ddC00` |
 | MockUSDC | `0x9944f1A0bd3C616eB09C694A90b4930384A6479A` |
-| TradingAccountFactory (fast trading) | `0xE6e2Eb4b65f48d7aB473fe70e5f07eB98Af54d37` |
+| TradingAccountFactory (fast trading) | `0xfB32e73a3dE3F0e3c057695D18cf6f58cAC57a6a` |
 | VaultFactory | `0x4A171285495bB9AE8b9f3E004b202205647a1a73` |
 | Perma Buyout (pBUY) | `0x0E3CEd8EE6C925F9A9c2B60f6710A22b1D75A816` |
 | Perma Growth (pGRO) | `0x1a742ac2c5416A6d01A9D1C5b6A039bAC7EC1192` |

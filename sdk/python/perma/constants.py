@@ -7,7 +7,7 @@ ARBITRUM_SEPOLIA = {
     "umbrella": "0x6a45Fd87609163Fe1BB19a5393ABf974D97ddC00",
     "usdc": "0x9944f1A0bd3C616eB09C694A90b4930384A6479A",
     "vaults": "0x4A171285495bB9AE8b9f3E004b202205647a1a73",
-    "trading_accounts": "0xE6e2Eb4b65f48d7aB473fe70e5f07eB98Af54d37",
+    "trading_accounts": "0xfB32e73a3dE3F0e3c057695D18cf6f58cAC57a6a",
     "deploy_block": 331747291,
     # Arbitrum charges the base fee only; the cap just has to stay above it.
     "max_fee_gwei": 0.2,
