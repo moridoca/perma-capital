@@ -15,6 +15,23 @@ ARBITRUM_SEPOLIA = {
     "log_chunk": 50000,
 }
 
+# Trial deployment on Hyperliquid's EVM testnet. Addresses are filled in once scripts/perma/deploy_hyperevm_testnet.ts
+# has run. Fast blocks there hold 2 million gas: opening a vault (about 4.5 million) needs the account switched to
+# big blocks. Logs can be read 50 blocks at a time, so history calls (user_fills, candles) need a small lookback.
+HYPEREVM_TESTNET = {
+    "name": "hyperevm-testnet",
+    "chain_id": 998,
+    "rpc_url": "https://rpc.hyperliquid-testnet.xyz/evm",
+    "umbrella": "",
+    "usdc": "",
+    "vaults": "",
+    "trading_accounts": "",
+    "deploy_block": 0,
+    "max_fee_gwei": 5,
+    "priority_fee_gwei": 0,
+    "log_chunk": 50,
+}
+
 DECIMALS = 6
 ONE = 10**DECIMALS
 MAX_UINT = 2**256 - 1
