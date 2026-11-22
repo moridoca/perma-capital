@@ -8,7 +8,7 @@
 //
 // The script plays the full life of one sub-fund in about three minutes:
 // launch -> primary sale -> market opens -> capital deployed -> limit order
-// next to the fund's ladder -> sell-off and rule-based buyback -> revaluation -> management fee and
+// next to the fund's ladder -> sell-off, surplus pot, buyback and dividend by holder vote -> revaluation -> management fee and
 // vesting -> token holders replace the GP -> exit proceeds compound.
 
 import { ethers } from 'ethers'
@@ -148,15 +148,31 @@ const artifact = async (name: string) => {
     await mustFail('cancelling a filled order', book.connect(alice), 'cancel', [0])
     await status('after the first trades')
 
-    console.log('=== 5. Sell-off, discount, rule-based buyback ===')
-    await mustFail('buyback without a discount', fund, 'buyback', [units(1000), []])
+    console.log('=== 5. Sell-off, surplus pot, buyback and dividend by holder vote ===')
+    await mustFail('buyback that holders have not approved', fund, 'buyback', [units(1000), []])
     const bobBefore = await token.balanceOf(await A(bob))
     await send(book.connect(bob).sell(units(250000), 0, []))
     const bobAfter = await token.balanceOf(await A(bob))
-    console.log('  Bob sold ' + fmt(v6 ? bobBefore - bobAfter : bobBefore.sub(bobAfter)) + ' pBUY: the ladder took it on its way down; the market is now more than 10% below NAV')
+    console.log('  Bob sold ' + fmt(v6 ? bobBefore - bobAfter : bobBefore.sub(bobAfter)) + ' pBUY: the ladder took it on its way down')
     await status('after the sell-off')
-    await send(fund.connect(carol).buyback(units(30000), []))
-    await status('anyone triggered a 30,000 buyback: vault cash becomes fresh bids')
+    const pot = await fund.surplus()
+    const third = v6 ? pot / 3n : pot.div(3)
+    console.log('  surplus pot (trading fees so far): ' + fmt(pot) + ' mUSDC; the GP asks holders for a third of it for a buyback')
+    await send(fund.proposeSurplusUse(1, third))
+    await send(fund.connect(alice).voteIssuance(units(5000000)))
+    await send(fund.connect(carol).executeIssuance())
+    await send(fund.connect(alice).withdrawIssuanceVotes(2))
+    await mustFail('buyback by someone who is not the GP', fund.connect(carol), 'buyback', [third, []])
+    await send(fund.buyback(third, []))
+    await status('buyback from the surplus pot: tokens burned, the money now bids on the ladder')
+    await send(fund.proposeSurplusUse(2, third))
+    await send(fund.connect(alice).voteIssuance(units(5000000)))
+    await send(fund.connect(carol).executeIssuance())
+    await send(fund.connect(alice).withdrawIssuanceVotes(3))
+    await send(fund.payDividend(third))
+    console.log('  dividend paid; Bob can collect ' + fmt(await fund.dividendOf(await A(bob))) + ' mUSDC')
+    await send(fund.connect(carol).claimDividend(await A(bob)))
+    await status('dividend of a third of the pot paid to the tokens in wallets')
 
     console.log('=== 6. Revaluation: the ladder and the issue price follow NAV ===')
     await send(fund.markInvestments(units(7500000), 'Year-end valuation'))

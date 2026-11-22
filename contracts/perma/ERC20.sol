@@ -42,8 +42,12 @@ contract ERC20 {
         return true;
     }
 
+    /// @dev Called before balances change (address(0) for mint and burn).
+    function _beforeMove(address from, address to, uint256 value) internal virtual {}
+
     function _transfer(address from, address to, uint256 value) internal {
         require(to != address(0), "ERC20: transfer to zero");
+        _beforeMove(from, to, value);
         require(balanceOf[from] >= value, "ERC20: balance too low");
         unchecked {
             balanceOf[from] -= value;
@@ -53,12 +57,14 @@ contract ERC20 {
     }
 
     function _mint(address to, uint256 value) internal {
+        _beforeMove(address(0), to, value);
         totalSupply += value;
         balanceOf[to] += value;
         emit Transfer(address(0), to, value);
     }
 
     function _burn(address from, uint256 value) internal {
+        _beforeMove(from, address(0), value);
         require(balanceOf[from] >= value, "ERC20: burn exceeds balance");
         unchecked {
             balanceOf[from] -= value;

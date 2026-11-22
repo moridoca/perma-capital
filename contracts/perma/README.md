@@ -12,7 +12,7 @@ Prototype for the Remix VM and testnets. mUSDC is play money.
 | File | Role |
 |---|---|
 | UmbrellaFactory.sol | The umbrella. Launches sub-funds and lists them. One call, overview(i), returns addresses, NAV, market price and premium/discount. |
-| SubFund.sol | One sub-fund: primary sale, vault, NAV, fee, buyback, issuance vote, GP removal vote. |
+| SubFund.sol | One sub-fund: primary sale, vault, NAV, fee, surplus pot with buyback and dividend, holder votes, GP removal vote. |
 | FundToken.sol | The sub-fund's share token. Freely transferable ERC-20; only the sub-fund can mint. |
 | OrderBook.sol | Secondary market. Below NAV the fund's cash on a ladder of 250 bid rungs in 0.2% steps down to NAV -50%, each reselling 0.1% higher; above NAV new issuance at NAV +0.2%; plus holders' limit orders. 0.07% taker fee, paid to the fund. |
 | GPVesting.sol | Holds the manager's fee tokens until they vest. |
@@ -38,8 +38,9 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 | Management fee | 2% of initial supply per year, paid in new tokens (190,000) | mintManagementFee |
 | Fee lifetime cap | 10 tranches (1,900,000 tokens), then never again | FEE_YEARS_CAP |
 | Fee lock-up | each tranche unlocks one year after minting | GPVesting |
-| Buyback trigger | market price 10% or more below NAV | BUYBACK_TRIGGER_BPS, buyback |
-| Buyback size | at most 1% of vault cash per execution, one per week, anyone can trigger | buyback |
+| Surplus pot | the 0.07% taker fees, and what the ladder's rungs hold above their share of 5% of net assets once anyone calls sweepLadder(); part of vault cash and of NAV, but the GP cannot invest it | surplus, fee, sweepLadder, freeCash |
+| Buyback | only from the surplus pot, only the amount holders approved (GP proposes, more than 50% of eligible supply says yes), carried out by the GP, only while the market is below NAV; tokens are burned | proposeSurplusUse, buyback |
+| Dividend | only from the surplus pot, same vote; the GP pays it as mUSDC per token to every token in a wallet at that moment; holders collect it; a declared dividend leaves NAV | proposeSurplusUse, payDividend, claimDividend |
 | GP removal | more than 50% of eligible supply votes yes; unvested fee tokens are burned | executeRemoveGP |
 | Eligible supply | total supply minus unvested fee tokens, the fund's own tokens on the ladder and the GP's wallet | eligibleSupply |
 
@@ -54,8 +55,8 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 
 Market price and NAV are two separate numbers, but the fund keeps them close:
 above NAV it issues new tokens at NAV +0.2% in the amount holders approved,
-so the market cannot run away upwards while approved tokens last; below NAV its ladder bids down to NAV -50%, and from NAV -10% the buyback
-rule leans against the discount as well. Below the ladder only holders' orders trade.
+so the market cannot run away upwards while approved tokens last; below NAV its ladder bids down to NAV -50%.
+Below the ladder only holders' orders trade. A buyback is a decision of GP and holders, paid from the surplus pot.
 
 ## The order book
 
@@ -121,10 +122,13 @@ trading in the same order books.
 | Leader's own stake | at least 5% of the shares; larger deposits by others and smaller holdings by the leader are refused | LEADER_MIN_BPS |
 | Price of new shares | vault value per share with fund tokens at the higher of market price and NAV | issuePrice, deposit |
 | Value shown, profit | fund tokens at the lower of market price and NAV | value, sharePrice |
-| Lock | a deposit can be redeemed one day later (120 seconds in the test deployment) | LOCK |
-| Redemption | in kind: the same fraction of the mUSDC and of every fund token the vault holds; open orders are cancelled only if the free balances do not cover it | redeem |
+| Lock | a deposit can be withdrawn one day later (120 seconds in the test deployment) | LOCK |
+| Withdrawal | in mUSDC: the depositor's fraction of the cash, plus what the sale of the same fraction of every position brings at market (the depositor's slippage). Open orders are cancelled only if the free balances do not cover it. What the book does not take is paid out as tokens | redeem |
+| Shares | an ERC-20 token per vault, with the ERC-4626 views asset, totalAssets, convertToShares, convertToAssets; what was paid for shares and their lock travel with them; the leader's shares are not transferable | Vault is ERC20 |
+| Agents | the leader can let other addresses trade for the vault; they can do nothing else | setAgent |
+| Dividends | a vault collects the dividends of the fund tokens it holds; anyone can trigger it | collectDividends |
 | Profit share | 10% of a depositor's profit, moved to the leader in shares at redemption; no management fee | PROFIT_SHARE_BPS |
-| Closing | the leader can close: orders cancelled, no trading, no deposits, redemption without lock | close |
+| Closing | once every position is sold: orders cancelled, no trading, no deposits, withdrawal without lock | close |
 
 Why two prices. A vault needs a price for the fund tokens it holds, and the
 only prices on-chain are the book's market price and the GP-reported NAV.
@@ -133,8 +137,19 @@ and buying back (cost about 0.25% of the volume). If shares were issued at
 that price, a depositor could push it down, deposit cheaply and take the
 difference from the other depositors. Issuing at the higher of the two closes
 that. Measuring profit at the lower of the two keeps a leader from buying
-below NAV and collecting a profit share on the paper gain. Redemptions need
-no price at all because they are paid in kind.
+below NAV and collecting a profit share on the paper gain. A withdrawal needs
+no price for the position part: that part is sold, and the depositor gets what
+the sale brings.
+
+What follows Hyperliquid's documentation (Vaults, For vault leaders, For vault
+depositors): 100 minimum to open, fixed name and description, 5% leader stake,
+10% profit share at withdrawal, one-day lock, deposits and withdrawals in the
+quote asset with orders cancelled and positions closed when a withdrawal needs
+it, agents, closing only with no positions, tokenised shares along ERC-4626.
+What differs: Hyperliquid closes 20% of positions at a time until the margin
+suffices, here exactly the withdrawing depositor's fraction is sold; there is
+no creation fee; ERC-4626's mint and withdraw-by-amount are left out because a
+withdrawal's amount depends on the fills.
 
 What this costs: while a fund trades below NAV, a new depositor pays NAV for
 tokens the market values lower, so entering a vault that is invested costs the
@@ -151,9 +166,10 @@ Other limits:
   share and the depositors' right to leave after a day are what stands
   against it. This is the same trust a Hyperliquid vault asks for.
 - Both prices follow the GP's NAV report (the market through the ladder).
-- Shares are not transferable and there is no vault-level governance.
-- Opening a vault costs about 3.6 million gas, a deposit 127,000, a market
-  order through a vault 316,000, a redemption 180,000 (local chain).
+- There is no vault-level governance.
+- Opening a vault costs about 4.5 million gas, a deposit 129,000, a market
+  order through a vault 534,000, a withdrawal with a sale 365,000 (local chain).
+- VaultFactory is 24,306 of 24,576 bytes: there is little room left in Vault.
 
 ## Run the demo
 
@@ -201,9 +217,14 @@ the order book before trading.
 - The reserve is 5% of the fund spread over 50% of price. It slows a fall and
   earns on every bounce; it cannot hold a price against sellers of more than
   about 5% of the fund.
-- The buyback buys the cheapest offers once the market is 10% below NAV. A
-  sale into the book right before buyback() can profit from it (MEV); the 1%
-  cap bounds the damage.
+- A sale into the book right before the GP's buyback() can profit from it
+  (MEV); the approved amount bounds the damage.
+- Dividends go to tokens in wallets only. Tokens resting in a sell order or
+  locked in a vote at the moment of payment get nothing, the yes-voters'
+  tokens included unless they are withdrawn first (the vote ends with the
+  approval, the GP pays afterwards).
+- Every token transfer now also updates the dividend account of sender and
+  receiver in the fund, which costs gas on each trade.
 - The GP cannot vote from his own wallet, but nothing stops him from moving
   vested tokens to another wallet first.
 - No whitelist and no identity checks. That is deliberate for a prototype that

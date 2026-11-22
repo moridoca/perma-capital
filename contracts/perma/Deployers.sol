@@ -13,14 +13,24 @@ import "./SubFund.sol";
 /// @title ComponentDeployer - creates token, order book and vesting for a sub-fund
 /// @notice Called by a SubFund from its own constructor, so msg.sender
 ///         is the sub-fund and becomes the only minter of the new token.
+/// @dev Split off so that ComponentDeployer stays under the size limit. Created by
+///      ComponentDeployer's constructor, so it needs no deployment step of its own.
+contract VestingDeployer {
+    function deploy(address token, address fund, uint256 yearSeconds) external returns (address) {
+        return address(new GPVesting(token, fund, yearSeconds));
+    }
+}
+
 contract ComponentDeployer {
+    VestingDeployer public immutable vestings = new VestingDeployer();
+
     function deploy(string calldata name, string calldata symbol, address usdc, uint256 yearSeconds)
         external
         returns (address token, address book, address vesting)
     {
         token = address(new FundToken(name, symbol, msg.sender));
         book = address(new OrderBook(token, usdc, msg.sender));
-        vesting = address(new GPVesting(token, msg.sender, yearSeconds));
+        vesting = vestings.deploy(token, msg.sender, yearSeconds);
     }
 }
 

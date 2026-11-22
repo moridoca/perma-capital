@@ -27,8 +27,9 @@ interface IComponentDeployer {
 ///             the money goes into the vault and never dilutes holders
 ///           - management fee paid in tokens: 2% of initial supply per year,
 ///             10-year lifetime cap, each tranche locked for one year
-///           - buyback-and-burn that anyone can trigger when the market
-///             trades 10% or more below NAV
+///           - a surplus pot (trading fees and what the ladder earns) that pays
+///             for buybacks and dividends; both only when the GP proposes
+///             them and holders approve
 ///           - token holders can replace the GP; unvested fee tokens are burned
 ///
 ///         What stays a trust assumption: the value of off-chain
@@ -49,9 +50,10 @@ contract SubFund {
     uint256 public constant FEE_BPS_PER_YEAR = 200;   // 2% of initial supply per year
     uint256 public constant FEE_YEARS_CAP = 10;       // fee minting stops for good after 10 tranches
 
-    // --- discount control ---
-    uint256 public constant BUYBACK_TRIGGER_BPS = 1000; // market price 10% or more below NAV
-    uint256 public constant BUYBACK_MAX_BPS = 100;      // at most 1% of vault cash per execution
+    // --- what a holder vote can be about ---
+    uint8 public constant KIND_ISSUANCE = 0; // new tokens for the order book
+    uint8 public constant KIND_BUYBACK = 1;  // mUSDC from the surplus for buying back and burning
+    uint8 public constant KIND_DIVIDEND = 2; // mUSDC from the surplus paid to holders
 
     // --- governance ---
     uint256 public constant REMOVAL_THRESHOLD_BPS = 5000; // more than 50% of eligible supply
@@ -84,13 +86,23 @@ contract SubFund {
     uint256 public feeTranchesMinted;
     uint256 public lastFeeMint;
 
-    // buyback state
-    uint256 public lastBuyback;
+    // surplus: trading fees and ladder profit, part of vault cash, kept apart from
+    // the money the GP invests. Buybacks and dividends are paid from it only.
+    uint256 public surplus;
+    uint256 public buybackApproved;  // mUSDC holders have approved for buybacks
+    uint256 public dividendApproved; // mUSDC holders have approved for dividends
+
+    // dividends: cumulative mUSDC per token (scaled by 1e18) and each holder's position in it
+    uint256 public dividendPerToken;
+    uint256 public dividendsUnclaimed; // declared and not yet collected; no longer part of net assets
+    mapping(address => uint256) private dividendSeen;
+    mapping(address => uint256) private dividendOwed;
 
     // issuance state: what holders have approved and the book has not sold yet
     uint256 public issuanceApproved;
     uint256 public issueProposalId;
-    uint256 public issueProposed;   // tokens asked for in the running vote
+    uint256 public issueProposed;   // amount asked for in the running vote: tokens, or mUSDC for buyback and dividend
+    uint8 public issueKind;         // what the running or last vote is about
     uint256 public issueDeadline;
     uint256 public issueYes;
     mapping(uint256 => mapping(address => uint256)) public issueEscrow;
@@ -113,6 +125,11 @@ contract SubFund {
     event ManagementFeeMinted(uint256 tranche, uint256 tokens);
     event BuybackExecuted(address indexed caller, uint256 usdcSpent, uint256 tokensBurned, uint256 priceAfter);
     event IssuanceProposed(uint256 indexed id, uint256 tokens, uint256 deadline);
+    event Proposed(uint256 indexed id, uint8 kind, uint256 amount, uint256 deadline);
+    event Approved(uint256 indexed id, uint8 kind, uint256 amount);
+    event SurplusAdded(uint256 usdc, uint256 surplus);
+    event DividendPaid(uint256 usdc, uint256 perTokenE18);
+    event DividendClaimed(address indexed holder, uint256 usdc);
     event IssuanceVoted(uint256 indexed id, address indexed voter, uint256 tokens);
     event IssuanceApproved(uint256 indexed id, uint256 tokens, uint256 approvedNow);
     event RemovalProposed(uint256 indexed id, address indexed proposer, address newGP, uint256 deadline);
@@ -192,6 +209,7 @@ contract SubFund {
     /// @notice GP sends vault cash to an investment (off-chain asset). Booked at cost.
     function deployCapital(address to, uint256 amount, string calldata memo) external onlyGP {
         require(saleClosed, "Fund: sale open");
+        require(amount <= freeCash(), "Fund: above free vault cash");
         investedValue += amount;
         require(usdc.transfer(to, amount), "Fund: transfer failed");
         emit CapitalDeployed(to, amount, memo);
@@ -225,10 +243,17 @@ contract SubFund {
         return book.inventory();
     }
 
-    /// @notice Net assets = vault cash + the fund's cash in the book + reported investments.
+    /// @notice Vault cash the GP can invest: without the surplus pot and without
+    ///         dividends that are declared and not collected yet.
+    function freeCash() public view returns (uint256) {
+        return vaultCash() - surplus - dividendsUnclaimed;
+    }
+
+    /// @notice Net assets = vault cash (surplus included, declared dividends not)
+    ///         + the fund's cash in the book + reported investments.
     function netAssets() public view returns (uint256) {
         (, uint256 bookCash) = ownedLiquidity();
-        return vaultCash() + bookCash + investedValue;
+        return vaultCash() - dividendsUnclaimed + bookCash + investedValue;
     }
 
     /// @notice Tokens held by investors and the GP. The fund's own tokens on
@@ -284,41 +309,100 @@ contract SubFund {
     }
 
     // ==================================================================
-    // 4. Discount control: rule-based buyback-and-burn
+    // 4. Surplus pot: buyback and dividend, both proposed by the GP and
+    //    approved by holders
     // ==================================================================
 
-    function buybackTriggerPrice() public view returns (uint256) {
-        return (navPerToken() * (10_000 - BUYBACK_TRIGGER_BPS)) / 10_000;
+    /// @notice The book reports the taker fee it has just paid into the vault.
+    function fee(uint256 usdcAmount) external {
+        require(msg.sender == address(book), "Fund: only the book");
+        surplus += usdcAmount;
+        emit SurplusAdded(usdcAmount, surplus);
     }
 
-    function maxBuyback() public view returns (uint256) {
-        return (vaultCash() * BUYBACK_MAX_BPS) / 10_000;
-    }
-
-    /// @notice Anyone can make the fund buy its own tokens in the book and
-    ///         burn them while the market trades 10% or more below NAV. Limited to 1%
-    ///         of vault cash per execution and one execution per "week".
-    ///         Buying below NAV never lowers NAV per token.
-    ///         Bought from holders' sell orders, this is a buyback at a
-    ///         discount. Bought from the ladder, it turns treasury tokens into
-    ///         fresh bids: vault cash moves onto the rungs where the market stands.
-    /// @param ids Resting sell orders to buy from, cheapest first (may be empty).
-    function buyback(uint256 usdcAmount, uint256[] calldata ids) external {
+    /// @notice Anyone can move what the ladder has earned into the surplus pot:
+    ///         cash on a rung above its share of 5% of net assets.
+    function sweepLadder() external returns (uint256 taken) {
         require(saleClosed, "Fund: sale open");
-        require(block.timestamp >= lastBuyback + YEAR / 52, "Fund: buyback cooldown");
+        taken = book.skim((netAssets() * RESERVE_BPS) / 10_000);
+        surplus += taken;
+        emit SurplusAdded(taken, surplus);
+    }
+
+    /// @notice The GP buys tokens in the book with surplus money and burns them,
+    ///         up to what holders approved. Only while the market is below NAV,
+    ///         so a buyback never lowers NAV per token.
+    /// @param ids Resting sell orders to buy from, cheapest first (may be empty).
+    function buyback(uint256 usdcAmount, uint256[] calldata ids) external onlyGP {
+        require(usdcAmount > 0 && usdcAmount <= buybackApproved && usdcAmount <= surplus, "Fund: above approved surplus");
         uint256 navBefore = navPerToken();
-        require(marketPrice() <= buybackTriggerPrice(), "Fund: discount below trigger");
-        require(usdcAmount > 0 && usdcAmount <= maxBuyback(), "Fund: amount above limit");
-        lastBuyback = block.timestamp;
+        require(marketPrice() < navBefore, "Fund: market not below NAV");
 
         usdc.approve(address(book), usdcAmount);
         (uint256 bought, uint256 spent) = book.buy(usdcAmount, 0, ids);
         usdc.approve(address(book), 0);
+        // the fee on this purchase came back into the surplus through fee()
+        buybackApproved -= spent;
+        surplus -= spent;
         token.burn(bought);
 
         require(marketPrice() <= navBefore, "Fund: would push price above NAV");
         emit BuybackExecuted(msg.sender, spent, bought, marketPrice());
         _emitNAV();
+    }
+
+    /// @notice The GP pays an approved dividend out of the surplus: mUSDC per token
+    ///         to every token in a wallet at this moment. Tokens in the order book,
+    ///         tokens locked in a vote and unvested fee tokens get nothing, so
+    ///         holders should take their tokens back first.
+    function payDividend(uint256 usdcAmount) external onlyGP {
+        require(usdcAmount > 0 && usdcAmount <= dividendApproved && usdcAmount <= surplus, "Fund: above approved surplus");
+        uint256 entitled = token.totalSupply() - token.balanceOf(address(book)) - token.balanceOf(address(this))
+            - token.balanceOf(address(vesting));
+        require(entitled > 0, "Fund: no entitled tokens");
+        uint256 per = (usdcAmount * 1e18) / entitled;
+        uint256 paid = (per * entitled) / 1e18;
+        dividendPerToken += per;
+        dividendApproved -= usdcAmount;
+        surplus -= paid;
+        dividendsUnclaimed += paid;
+        emit DividendPaid(paid, per);
+        _emitNAV();
+    }
+
+    function _entitled(address who) private view returns (bool) {
+        return who != address(0) && who != address(book) && who != address(this) && who != address(vesting);
+    }
+
+    function _accrue(address who) private {
+        if (_entitled(who)) dividendOwed[who] += (token.balanceOf(who) * (dividendPerToken - dividendSeen[who])) / 1e18;
+        dividendSeen[who] = dividendPerToken;
+    }
+
+    /// @notice Called by the token before a balance changes, so that dividends
+    ///         stay with whoever held the tokens when they were paid.
+    function settle(address from, address to) external {
+        require(msg.sender == address(token), "Fund: only the token");
+        _accrue(from);
+        _accrue(to);
+    }
+
+    /// @notice Dividends a holder can collect.
+    function dividendOf(address who) public view returns (uint256) {
+        if (!_entitled(who)) return dividendOwed[who];
+        return dividendOwed[who] + (token.balanceOf(who) * (dividendPerToken - dividendSeen[who])) / 1e18;
+    }
+
+    /// @notice Sends a holder's dividends to that holder. Anyone can trigger it,
+    ///         so contracts that hold tokens (vaults, trading accounts) get theirs too.
+    function claimDividend(address who) external returns (uint256 amount) {
+        _accrue(who);
+        amount = dividendOwed[who];
+        require(amount > 0, "Fund: nothing to collect");
+        dividendOwed[who] = 0;
+        dividendsUnclaimed -= amount;
+        require(usdc.transfer(who, amount), "Fund: payment failed");
+        emit DividendClaimed(who, amount);
     }
 
     /// @notice Anyone can make the fund bring its liquidity in the book back to
@@ -332,7 +416,7 @@ contract SubFund {
         uint256 have = bookCash + (bookTokens * navPerToken()) / ONE;
         require(have < target, "Fund: reserve at target");
         uint256 amount = target - have;
-        if (amount > vaultCash()) amount = vaultCash();
+        if (amount > freeCash()) amount = freeCash();
         usdc.approve(address(book), amount);
         used = book.refill(amount, target, 250);
         usdc.approve(address(book), 0);
@@ -352,14 +436,29 @@ contract SubFund {
     ///         new tokens. He does not set a price and names no buyer: approved
     ///         tokens are offered to everyone in the order book at NAV +0.2%.
     function proposeIssuance(uint256 tokenAmount) external onlyGP {
+        _propose(KIND_ISSUANCE, tokenAmount);
+        emit IssuanceProposed(issueProposalId, tokenAmount, issueDeadline);
+    }
+
+    /// @notice The GP asks holders to release mUSDC from the surplus pot for a
+    ///         buyback (KIND_BUYBACK) or a dividend (KIND_DIVIDEND). Same vote as
+    ///         for new tokens; one vote at a time.
+    function proposeSurplusUse(uint8 kind, uint256 usdcAmount) external onlyGP {
+        require(kind == KIND_BUYBACK || kind == KIND_DIVIDEND, "Fund: unknown kind");
+        require(usdcAmount + buybackApproved + dividendApproved <= surplus, "Fund: above the surplus");
+        _propose(kind, usdcAmount);
+    }
+
+    function _propose(uint8 kind, uint256 amount) private {
         require(saleClosed, "Fund: sale open");
         require(!issuanceVoteActive(), "Fund: vote already running");
-        require(tokenAmount > 0, "Fund: zero amount");
+        require(amount > 0, "Fund: zero amount");
         issueProposalId += 1;
-        issueProposed = tokenAmount;
+        issueProposed = amount;
+        issueKind = kind;
         issueDeadline = block.timestamp + VOTING_PERIOD;
         issueYes = 0;
-        emit IssuanceProposed(issueProposalId, tokenAmount, issueDeadline);
+        emit Proposed(issueProposalId, kind, amount, issueDeadline);
     }
 
     /// @notice Vote yes by locking tokens in the fund until the vote ends.
@@ -380,8 +479,15 @@ contract SubFund {
         require(issueYes * 10_000 > eligibleSupply() * REMOVAL_THRESHOLD_BPS, "Fund: threshold not reached");
         uint256 amount = issueProposed;
         issueProposed = 0;
-        issuanceApproved += amount;
-        emit IssuanceApproved(issueProposalId, amount, issuanceApproved);
+        emit Approved(issueProposalId, issueKind, amount);
+        if (issueKind == KIND_BUYBACK) {
+            buybackApproved += amount;
+        } else if (issueKind == KIND_DIVIDEND) {
+            dividendApproved += amount;
+        } else {
+            issuanceApproved += amount;
+            emit IssuanceApproved(issueProposalId, amount, issuanceApproved);
+        }
     }
 
     /// @notice Get locked voting tokens back once the vote is over.

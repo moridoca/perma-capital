@@ -10,6 +10,10 @@ import "./ERC20.sol";
 ///         primary sale (capped), liquidity seed (once),
 ///         management fee (2% p.a., lifetime cap), issuance approved by holders (above NAV).
 ///         Supply policy is therefore code, not a manager decision.
+interface IDividendBook {
+    function settle(address from, address to) external;
+}
+
 contract FundToken is ERC20 {
     address public immutable fund;
 
@@ -23,6 +27,11 @@ contract FundToken is ERC20 {
     }
 
     /// @notice Anyone can burn their own tokens (used by buyback-and-burn).
+    /// @dev The fund books each holder's dividends up to now before a balance changes.
+    function _beforeMove(address from, address to, uint256) internal override {
+        IDividendBook(fund).settle(from, to);
+    }
+
     function burn(uint256 amount) external {
         _burn(msg.sender, amount);
     }
