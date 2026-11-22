@@ -1551,6 +1551,7 @@
     window.ethereum.on('chainChanged', syncWallet)
   }
   $('netChip').textContent = CFG.short || CFG.network
+  document.querySelectorAll('.cfgnet').forEach((e) => { e.textContent = CFG.network })
   const NETS = window.PERMA_NETWORKS || {}
   const others = Object.keys(NETS).filter((k) => k !== CFG.key)
   if (others.length) $('netChip').insertAdjacentHTML('afterend', others.map((k) => '<a class="net alt" href="?net=' + esc(k) + '" title="Open the ' + esc(NETS[k].network) + ' deployment">' + esc(NETS[k].short) + '</a>').join(''))
