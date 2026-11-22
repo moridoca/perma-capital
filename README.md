@@ -24,6 +24,7 @@ separate sub-funds that are issued once and never wound up. University prototype
 |---|---|
 | UmbrellaFactory | `0x15690c82c8aabda3F5689157ebF637A4F5c8e672` |
 | MockUSDC | `0x232dA8232534064007557E29A9186240c567B64D` |
+| TradingAccountFactory (fast trading) | `0x8Da83E34460378F94f158C38697c7C93B75E51D4` |
 | Perma Buyout (pBUY) | `0x078526Fd41949e907326378794EF47B56d145c47` |
 | Perma Growth (pGRO) | `0x16F1De8877aB2A18eEFE1f49cf3bfDDFD0c469C6` |
 | Perma Agriculture (pAGR) | `0x6D3494e3ab8B6819A6322d4a05D5c66F08cA12BD` |

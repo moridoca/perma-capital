@@ -979,7 +979,7 @@
     const pk = store.get(TK)
     if (pk) { state.tk.wallet = new E.Wallet(pk); state.tk.on = store.get(TK + '.on') === '1'; state.tk.acct = store.get(TK + '.acct'); state.tk.owner = store.get(TK + '.owner') }
   } catch (e) { state.tk.wallet = null }
-  const TK_LOW = E.parseEther('0.0002')
+  const TK_LOW = E.parseEther(CFG.tkLow || '0.0002')
   const SESSION_ONLY = { swapbuy: 1, sell: 1, buy: 1, faucet: 1, mint: 1 }      // routed through the trading account
   const SESSION_DIRECT = { buyback: 1, fee: 1, close: 1, execute: 1 }          // need no funds: the key calls the fund itself
   const sessActive = () => !!(state.tk.sess && Number(state.tk.sess.expiry) > now())
