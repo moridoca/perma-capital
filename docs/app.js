@@ -912,8 +912,14 @@
   const feeOverrides = () => (CFG.fees ? {
     maxPriorityFeePerGas: E.parseUnits(CFG.fees.priorityGwei, 'gwei'), maxFeePerGas: E.parseUnits(CFG.fees.maxGwei, 'gwei')
   } : {})
+  // What the wallet itself answered. ethers files a wallet error it does not recognise under
+  // e.error ("could not coalesce error") and a rejection under e.info.error.
+  const walletErr = (e) => (e && (e.error || (e.info && e.info.error))) || null
+  const unauthorised = (e) => { const w = walletErr(e); return !!e && (e.code === 4100 || !!(w && w.code === 4100)) }
   const reason = (e) => {
-    const r = (e && (e.reason || (e.revert && e.revert.args && e.revert.args[0]) || e.shortMessage || (e.info && e.info.error && e.info.error.message) || e.message)) || String(e)
+    const w = walletErr(e)
+    if (unauthorised(e)) return 'MetaMask has not authorised this account on ' + CFG.network + '. Disconnect this site in MetaMask, connect again and retry.'
+    const r = (e && (e.reason || (e.revert && e.revert.args && e.revert.args[0]) || (e.code === 'UNKNOWN_ERROR' && w && w.message) || e.shortMessage || (w && w.message) || e.message)) || String(e)
     return String(r).replace(/^execution reverted:?\s*/i, '').slice(0, 220)
   }
   async function syncWallet() {
@@ -952,6 +958,31 @@
       } else log('Wallet: ' + reason(e), true)
     }
     syncWallet()
+  }
+  // MetaMask 13.55+ (MetaMask/metamask-extension#47773): a network the site adds while it is
+  // already connected is granted without accounts, so every send on it is refused with 4100
+  // before any prompt appears. Reconnecting the site repairs the grant.
+  async function reauthorise() {
+    const eth = window.ethereum, want = (state.mm || {}).account
+    log('MetaMask has not authorised this account on ' + CFG.network + ' – reconnect in your wallet…')
+    try {
+      try { await eth.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] }) } catch (e) { /* wallets without it: ask again anyway */ }
+      const accts = await eth.request({ method: 'eth_requestAccounts' })
+      if (!accts || !accts[0] || (want && E.getAddress(accts[0]) !== want)) throw new Error('A different account was connected: choose ' + (want ? short(want) : 'your account') + ' in MetaMask.')
+      if (parseInt(await eth.request({ method: 'eth_chainId' }), 16) !== CFG.chainId) {
+        await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x' + CFG.chainId.toString(16) }] })
+      }
+    } finally { await syncWallet() }
+    if (!state.mm.signer) throw new Error('Connect MetaMask on ' + CFG.network + ' and retry.')
+  }
+  // Sends through MetaMask; on that refusal reconnects once and sends again.
+  async function walletSend(send) {
+    try { return await send((state.mm || {}).signer) } catch (e) {
+      if (!unauthorised(e)) throw e
+      await reauthorise()
+      log('  reconnected, sending again – confirm in your wallet…')
+      return await send(state.mm.signer)
+    }
   }
   function renderWallet() {
     const chip = $('walletChip'), m = state.me
@@ -1083,7 +1114,7 @@
   }
   async function mmSend(label, make) {
     log(label + ' – confirm in your wallet…')
-    const tx = await make(state.mm.signer)
+    const tx = await walletSend(make)
     log('  sent, waiting for confirmation…')
     const t0 = Date.now(), rc = await confirmFast(tx)
     log('  confirmed in block ' + rc.blockNumber + ' after ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s.')
@@ -1141,11 +1172,11 @@
         if (what === 'create') {
           const fac = new E.Contract(CFG.tradingAccounts, ABI.accounts, mm.signer)
           try { await fac.create.staticCall(key.address, ...params, { value }) } catch (e) { throw new Error('Blocked by the contract: ' + reason(e)) }
-          await mmSend('Creating the trading account and starting a session', () => fac.create(key.address, ...params, Object.assign({ value }, feeOverrides())))
+          await mmSend('Creating the trading account and starting a session', (s) => fac.connect(s).create(key.address, ...params, Object.assign({ value }, feeOverrides())))
         } else {
           const acc = new E.Contract(state.tk.acct, ABI.account, mm.signer)
           try { await acc.startSession.staticCall(key.address, ...params, { value }) } catch (e) { throw new Error('Blocked by the contract: ' + reason(e)) }
-          await mmSend('Starting a session', () => acc.startSession(key.address, ...params, Object.assign({ value }, feeOverrides())))
+          await mmSend('Starting a session', (s) => acc.connect(s).startSession(key.address, ...params, Object.assign({ value }, feeOverrides())))
         }
         state.tk.on = true; store.set(TK + '.on', '1')
         await tkLoad(); await syncWallet()
@@ -1466,7 +1497,7 @@
         log((steps.length > 1 ? 'Step ' + (i + 1) + '/' + steps.length + ': ' : '') + label + (tkOn() ? ' – signed by the session key…' : ' – confirm in your wallet…'))
         const opts = feeOverrides(), k = tkOn() ? await tkNonce() : null
         if (k !== null) opts.nonce = k
-        const tx = await fn(...args, opts)
+        const tx = k !== null ? await fn(...args, opts) : await walletSend((sg) => (sg ? contract.connect(sg) : contract).getFunction(method)(...args, opts))
         if (k !== null) state.tk.nonce = k + 1
         const t0 = Date.now()
         log('  sent, waiting for confirmation…')
