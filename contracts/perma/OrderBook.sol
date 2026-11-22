@@ -12,6 +12,7 @@ interface INavSource {
     function navPerToken() external view returns (uint256);
     function issue(address to, uint256 tokens) external;
     function issuanceApproved() external view returns (uint256);
+    function fee(uint256 usdc) external;
 }
 
 /// @title OrderBook - the secondary market of one sub-fund
@@ -167,6 +168,20 @@ contract OrderBook {
         fundCash += uint128(used);
         if (used > 0) require(usdc.transferFrom(msg.sender, address(this), used), "Book: usdc transfer failed");
         emit Refilled(used);
+    }
+
+    /// @notice The fund takes back what its rungs have earned: cash above a rung's
+    ///         share of `target` goes to the fund. Rungs holding tokens are left alone.
+    function skim(uint256 target) external nonReentrant returns (uint256 taken) {
+        require(msg.sender == fund, "Book: only the fund");
+        for (uint256 i = 0; i < RUNGS; i++) {
+            uint256 want = (target * _weight(i)) / WEIGHT_TOTAL;
+            if (rungs[i].tokens > 0 || rungs[i].cash <= want) continue;
+            taken += rungs[i].cash - want;
+            rungs[i].cash = uint128(want);
+        }
+        fundCash -= uint128(taken);
+        if (taken > 0) require(usdc.transfer(fund, taken), "Book: usdc transfer failed");
     }
 
     /// @notice What the fund owns in this book: (tokens, mUSDC). Escrow of holders' orders is not included.
@@ -447,7 +462,10 @@ contract OrderBook {
             if (o.tokens == 0) _close(ids[k], o);
         }
 
-        if (fee > 0) require(usdc.transfer(fund, fee), "Book: fee transfer failed");
+        if (fee > 0) {
+            require(usdc.transfer(fund, fee), "Book: fee transfer failed");
+            INavSource(fund).fee(fee);
+        }
         if (buying) {
             require(token.transfer(msg.sender, m.tokens), "Book: token transfer failed");
         } else {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "./ERC20.sol";
+
 interface IUmbrellaForVault {
     function usdc() external view returns (address);
     function subFunds(uint256 index) external view returns (address);
@@ -11,6 +13,8 @@ interface ISubFundForVault {
     function book() external view returns (address);
     function navPerToken() external view returns (uint256);
     function marketPrice() external view returns (uint256);
+    function dividendOf(address who) external view returns (uint256);
+    function claimDividend(address who) external returns (uint256);
 }
 
 interface IBookForVault {
@@ -30,37 +34,35 @@ interface IERC20ForVault {
     function transferFrom(address from, address to, uint256 value) external returns (bool);
 }
 
-/// @title Vault: a pool of mUSDC that one leader trades for its depositors
-/// @notice Modelled on the user vaults of Hyperliquid, and separate from a
-///         sub-fund's own ladder: anyone can open a vault and trade it by any
-///         strategy; anyone can deposit and share in the result.
+/// @title Vault: mUSDC that one leader trades for its depositors
+/// @notice Built after the user vaults of Hyperliquid (docs: Vaults, For vault
+///         leaders, For vault depositors) and separate from a sub-fund's own
+///         ladder: anyone can open a vault and trade it by any strategy; anyone
+///         can deposit and share in the result.
 ///
-///         What the leader can do: trade the vault's money in the order books of
-///         this umbrella's sub-funds, with market and limit orders. Nothing else:
-///         no transfer out, no other contract, no other token. The leader takes
-///         money out the same way as every depositor, by redeeming shares.
-///         No fill above NAV +5% on a buy or below NAV -55% on a sell, so one
-///         trade against the leader's own order cannot empty the vault.
+///         As on Hyperliquid:
+///           - opened by anyone with at least 100 mUSDC of their own; name and
+///             description are fixed at creation
+///           - the leader must own at least 5% of the vault at all times
+///           - the leader gets 10% of a depositor's profit, taken when the
+///             depositor withdraws; no management fee
+///           - a deposit can be withdrawn after LOCK (one day in production)
+///           - deposits and withdrawals are in mUSDC. A withdrawal takes the
+///             depositor's fraction of the cash; if the free cash does not
+///             cover it, open orders are cancelled, and the same fraction of
+///             every position is sold at market. The slippage of that sale is
+///             the withdrawing depositor's
+///           - the leader can let agents trade for the vault
+///           - the vault can be closed once all positions are sold
+///           - shares are a token (ERC-20), with the ERC-4626 views asset,
+///             totalAssets, convertToShares and convertToAssets
 ///
-///         Rules, all enforced here:
-///           - Two prices per fund token, both read on-chain: the higher of
-///             market price and NAV, and the lower of the two. Shares are issued
-///             at the higher one, so pushing the market down for one transaction
-///             does not make shares cheap. Profit is measured at the lower one,
-///             so buying below NAV is no profit until the market pays for it.
-///           - Redemptions are paid in kind: the same fraction of the mUSDC and
-///             of every fund token the vault holds. No price is needed for that,
-///             and the leader cannot block it by staying invested. If the free
-///             balances do not cover a redemption, the vault's open orders are
-///             cancelled first.
-///           - A deposit can be redeemed after LOCK (one day in production).
-///           - The leader must own at least 5% of the vault: deposits that would
-///             push the leader below that are refused, and so are redemptions by
-///             the leader that would.
-///           - The leader gets 10% of each depositor's profit, taken in shares
-///             when the depositor redeems. No profit, no fee; no management fee.
-///           - The leader can close the vault. Then it only pays out.
-contract Vault {
+///         Different, because there is no oracle price here:
+///           - new shares are priced with fund tokens at the higher of market
+///             price and NAV; value and profit use the lower of the two
+///           - what the book does not take in a withdrawal is paid out as tokens
+///           - trades fill no higher than NAV +5% and no lower than NAV -55%
+contract Vault is ERC20 {
     uint256 private constant ONE = 1e6;
     uint256 public constant PROFIT_SHARE_BPS = 1000; // 10% of a depositor's profit
     uint256 public constant LEADER_MIN_BPS = 500;    // leader owns at least 5%
@@ -74,11 +76,11 @@ contract Vault {
     IERC20ForVault public immutable usdc;
     address public immutable leader;
     uint256 public immutable LOCK;
-    string public name;
+    string public description;
 
     bool public closed;
-    uint256 public totalShares;
-    mapping(address => uint256) public shares;
+    /// @notice Addresses the leader lets trade for the vault. They cannot do anything else.
+    mapping(address => bool) public agents;
     /// @notice Value a depositor paid in for the shares still held (mUSDC); profit is measured against it.
     mapping(address => uint256) public basis;
     mapping(address => uint256) public unlockAt;
@@ -100,6 +102,7 @@ contract Vault {
     event OrderRested(uint256 indexed fundIndex, uint256 id, bool buy, uint256 price, uint256 tokens);
     event OrderRemoved(uint256 indexed fundIndex, uint256 id);
     event Closed();
+    event AgentSet(address indexed agent, bool allowed);
 
     modifier nonReentrant() {
         require(!locked, "Vault: reentrant");
@@ -114,12 +117,20 @@ contract Vault {
         _;
     }
 
-    constructor(address umbrella_, address leader_, string memory name_, uint256 lockSeconds) {
+    modifier onlyTrader() {
+        require(msg.sender == leader || agents[msg.sender], "Vault: only the leader or an agent");
+        require(!closed, "Vault: closed");
+        _;
+    }
+
+    constructor(address umbrella_, address leader_, string memory name_, string memory description_, uint256 lockSeconds)
+        ERC20(name_, "VLT")
+    {
         factory = msg.sender;
+        description = description_;
         umbrella = IUmbrellaForVault(umbrella_);
         usdc = IERC20ForVault(IUmbrellaForVault(umbrella_).usdc());
         leader = leader_;
-        name = name_;
         LOCK = lockSeconds;
     }
 
@@ -150,9 +161,19 @@ contract Vault {
         }
     }
 
-    /// @notice mUSDC the vault owns: free plus the escrow of its buy orders.
-    function cashTotal() public view returns (uint256) {
-        return usdc.balanceOf(address(this)) + _escrow(0, true);
+    /// @notice mUSDC the vault owns: free, in the escrow of its buy orders, and
+    ///         dividends it has not collected yet.
+    function cashTotal() public view returns (uint256 c) {
+        c = usdc.balanceOf(address(this)) + _escrow(0, true);
+        for (uint256 k = 0; k < funds.length; k++) c += _fund(funds[k]).dividendOf(address(this));
+    }
+
+    /// @notice Collects the dividends of the fund tokens the vault holds. Anyone can call it.
+    function collectDividends() public {
+        for (uint256 k = 0; k < funds.length; k++) {
+            ISubFundForVault f = _fund(funds[k]);
+            if (f.dividendOf(address(this)) > 0) f.claimDividend(address(this));
+        }
     }
 
     /// @notice Tokens of one sub-fund the vault owns: free plus those in its sell orders.
@@ -175,12 +196,29 @@ contract Vault {
 
     /// @notice Value of one share in mUSDC (1.000000 before the first deposit).
     function sharePrice() public view returns (uint256) {
-        return totalShares == 0 ? ONE : (_value(false) * ONE) / totalShares;
+        return totalSupply == 0 ? ONE : (_value(false) * ONE) / totalSupply;
     }
 
     /// @notice What a new share costs: tokens at the higher of market and NAV.
     function issuePrice() public view returns (uint256) {
-        return totalShares == 0 ? ONE : (_value(true) * ONE + totalShares - 1) / totalShares;
+        return totalSupply == 0 ? ONE : (_value(true) * ONE + totalSupply - 1) / totalSupply;
+    }
+
+    // ERC-4626 views
+    function asset() external view returns (address) {
+        return address(usdc);
+    }
+
+    function totalAssets() external view returns (uint256) {
+        return _value(false);
+    }
+
+    function convertToShares(uint256 assets) external view returns (uint256) {
+        return (assets * ONE) / issuePrice();
+    }
+
+    function convertToAssets(uint256 shareAmount) external view returns (uint256) {
+        return (shareAmount * sharePrice()) / ONE;
     }
 
     // ------------------------------------------------------------------
@@ -189,55 +227,82 @@ contract Vault {
 
     /// @dev The factory moves the leader's first deposit in before calling this.
     function init(uint256 usdcAmount) external {
-        require(msg.sender == factory && totalShares == 0, "Vault: only the factory, once");
-        _mint(leader, usdcAmount, usdcAmount);
+        require(msg.sender == factory && totalSupply == 0, "Vault: only the factory, once");
+        _issue(leader, usdcAmount, usdcAmount);
     }
 
     /// @notice Pay mUSDC in and get shares at issuePrice().
     function deposit(uint256 usdcAmount, uint256 minShares) external nonReentrant returns (uint256 minted) {
         require(!closed, "Vault: closed");
         require(usdcAmount >= ONE, "Vault: below 1 mUSDC");
+        collectDividends();
         uint256 v = _value(true);
-        require(v > 0 && totalShares > 0, "Vault: no value");
-        minted = (usdcAmount * totalShares) / v;
+        require(v > 0 && totalSupply > 0, "Vault: no value");
+        minted = (usdcAmount * totalSupply) / v;
         require(minted > 0 && minted >= minShares, "Vault: too few shares");
         require(usdc.transferFrom(msg.sender, address(this), usdcAmount), "Vault: usdc transfer failed");
-        _mint(msg.sender, minted, usdcAmount);
-        require(shares[leader] * 10_000 >= totalShares * LEADER_MIN_BPS, "Vault: leader below 5%");
+        _issue(msg.sender, minted, usdcAmount);
+        require(balanceOf[leader] * 10_000 >= totalSupply * LEADER_MIN_BPS, "Vault: leader below 5%");
     }
 
-    function _mint(address to, uint256 amount, uint256 paid) private {
-        shares[to] += amount;
-        totalShares += amount;
+    function _issue(address to, uint256 amount, uint256 paid) private {
+        _mint(to, amount);
         basis[to] += paid;
         unlockAt[to] = block.timestamp + LOCK;
         emit Deposited(to, paid, amount);
     }
 
-    /// @notice Give shares back and receive the same fraction of everything the
-    ///         vault holds: mUSDC and the tokens of every sub-fund it is in.
+    /// @dev Shares can be passed on. What was paid for them and their lock go with
+    ///      them; the leader's shares stay with the leader while the vault is open.
+    function _beforeMove(address from, address to, uint256 amount) internal override {
+        if (from == address(0) || to == address(0) || from == to) return;
+        require(from != leader || closed, "Vault: the leader's shares are not transferable");
+        uint256 part = (basis[from] * amount) / balanceOf[from];
+        basis[from] -= part;
+        basis[to] += part;
+        if (unlockAt[from] > unlockAt[to]) unlockAt[to] = unlockAt[from];
+    }
+
+    /// @notice Withdraw: give shares back and receive mUSDC. You get your fraction of
+    ///         the vault's cash, and the same fraction of every position is sold at
+    ///         market for you. Open orders are cancelled only if the free balances
+    ///         do not cover it. What the book does not take comes as tokens.
     ///         A depositor's profit is shared with the leader first (10%, in shares).
-    function redeem(uint256 shareAmount) external nonReentrant returns (uint256 usdcOut) {
-        require(shareAmount > 0 && shareAmount <= shares[msg.sender], "Vault: not your shares");
+    /// @param ids Per sub-fund the vault is in (order of positions()): resting buy
+    ///        orders to sell into, best first. May be empty: then only the ladders bid.
+    function redeem(uint256 shareAmount, uint256 minUsdcOut, uint256[][] calldata ids)
+        external
+        nonReentrant
+        returns (uint256 usdcOut)
+    {
+        require(shareAmount > 0 && shareAmount <= balanceOf[msg.sender], "Vault: not your shares");
         require(closed || block.timestamp >= unlockAt[msg.sender], "Vault: deposit still locked");
+        collectDividends();
 
-        uint256 part = (basis[msg.sender] * shareAmount) / shares[msg.sender];
-        uint256 feeShares = 0;
-        if (msg.sender != leader) {
-            uint256 worth = (value() * shareAmount) / totalShares;
-            if (worth > part) {
-                uint256 fee = ((worth - part) * PROFIT_SHARE_BPS) / 10_000;
-                feeShares = (shareAmount * fee) / worth;
-                basis[leader] += fee;
+        uint256 supply = totalSupply;
+        uint256 burned = shareAmount;
+        {
+            uint256 part = (basis[msg.sender] * shareAmount) / balanceOf[msg.sender];
+            uint256 feeShares = 0;
+            if (msg.sender != leader) {
+                uint256 worth = (_value(false) * shareAmount) / supply;
+                if (worth > part) {
+                    uint256 fee = ((worth - part) * PROFIT_SHARE_BPS) / 10_000;
+                    feeShares = (shareAmount * fee) / worth;
+                    basis[leader] += fee;
+                }
             }
+            basis[msg.sender] -= part;
+            burned = shareAmount - feeShares;
+            if (feeShares > 0) {
+                balanceOf[msg.sender] -= feeShares;
+                balanceOf[leader] += feeShares;
+                emit Transfer(msg.sender, leader, feeShares);
+            }
+            emit Redeemed(msg.sender, shareAmount, feeShares, 0);
         }
-        basis[msg.sender] -= part;
-        shares[msg.sender] -= shareAmount;
-        uint256 burned = shareAmount - feeShares;
-        if (feeShares > 0) shares[leader] += feeShares;
 
-        // In kind: the fraction burned / totalShares of every asset.
-        uint256 supply = totalShares;
+        // The fraction burned / supply of every asset.
         uint256 n = funds.length;
         uint256[] memory owed = new uint256[](n);
         usdcOut = (cashTotal() * burned) / supply;
@@ -247,16 +312,33 @@ contract Vault {
             if (owed[k] > _token(funds[k]).balanceOf(address(this))) short = true;
         }
         if (short) _cancelAll();
-        totalShares = supply - burned;
-
+        _burn(msg.sender, burned);
         if (msg.sender == leader && !closed) {
-            require(shares[leader] * 10_000 >= totalShares * LEADER_MIN_BPS, "Vault: leader below 5%");
+            require(balanceOf[leader] * 10_000 >= totalSupply * LEADER_MIN_BPS, "Vault: leader below 5%");
         }
-        if (usdcOut > 0) require(usdc.transfer(msg.sender, usdcOut), "Vault: usdc transfer failed");
+
+        // Sell the positions' part at market; what is not taken goes out as tokens.
         for (uint256 k = 0; k < n; k++) {
-            if (owed[k] > 0) require(_token(funds[k]).transfer(msg.sender, owed[k]), "Vault: token transfer failed");
+            if (owed[k] == 0) continue;
+            IERC20ForVault t = _token(funds[k]);
+            address b = _fund(funds[k]).book();
+            uint256 sold = 0;
+            t.approve(b, owed[k]);
+            try IBookForVault(b).sell(owed[k], 0, k < ids.length ? ids[k] : new uint256[](0)) returns (uint256 got, uint256 s) {
+                usdcOut += got;
+                sold = s;
+            } catch {}
+            t.approve(b, 0);
+            if (owed[k] > sold) require(t.transfer(msg.sender, owed[k] - sold), "Vault: token transfer failed");
         }
-        emit Redeemed(msg.sender, shareAmount, feeShares, usdcOut);
+        require(usdcOut >= minUsdcOut, "Vault: less mUSDC than asked for");
+        if (usdcOut > 0) require(usdc.transfer(msg.sender, usdcOut), "Vault: usdc transfer failed");
+    }
+
+    /// @notice The leader lets another address trade for the vault, or ends that.
+    function setAgent(address agent, bool allowed) external onlyLeader {
+        agents[agent] = allowed;
+        emit AgentSet(agent, allowed);
     }
 
     // ------------------------------------------------------------------
@@ -288,7 +370,7 @@ contract Vault {
 
     function buy(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut, uint256[] calldata ids)
         external
-        onlyLeader
+        onlyTrader
         nonReentrant
         returns (uint256 tokenOut, uint256 spent)
     {
@@ -304,7 +386,7 @@ contract Vault {
 
     function sell(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut, uint256[] calldata ids)
         external
-        onlyLeader
+        onlyTrader
         nonReentrant
         returns (uint256 usdcOut, uint256 sold)
     {
@@ -321,7 +403,7 @@ contract Vault {
 
     function limitBuy(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] calldata ids)
         external
-        onlyLeader
+        onlyTrader
         nonReentrant
         returns (uint256 id, uint256 filled)
     {
@@ -337,7 +419,7 @@ contract Vault {
 
     function limitSell(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] calldata ids)
         external
-        onlyLeader
+        onlyTrader
         nonReentrant
         returns (uint256 id, uint256 filled)
     {
@@ -359,7 +441,7 @@ contract Vault {
         emit OrderRested(fundIndex, id, isBuy, price, tokens);
     }
 
-    function cancel(uint256 fundIndex, uint256 id) external onlyLeader nonReentrant {
+    function cancel(uint256 fundIndex, uint256 id) external onlyTrader nonReentrant {
         for (uint256 k = 0; k < resting.length; k++) {
             if (resting[k].fund == fundIndex && resting[k].id == id) {
                 IBookForVault(_fund(fundIndex).book()).cancel(id);
@@ -399,11 +481,12 @@ contract Vault {
         }
     }
 
-    /// @notice The leader ends the vault: open orders are cancelled, trading and
-    ///         deposits stop, everyone redeems without a lock. What the vault
-    ///         holds in fund tokens is paid out as tokens.
+    /// @notice The leader ends the vault once every position is sold: open orders
+    ///         are cancelled, trading and deposits stop, everyone withdraws their
+    ///         share of the cash without a lock.
     function close() external onlyLeader nonReentrant {
         _cancelAll();
+        for (uint256 k = 0; k < funds.length; k++) require(tokensTotal(funds[k]) < ONE, "Vault: sell all positions first");
         closed = true;
         emit Closed();
     }
@@ -417,6 +500,7 @@ contract Vault {
         view
         returns (
             string memory name_,
+            string memory description_,
             address leader_,
             bool closed_,
             uint256 totalShares_,
@@ -428,7 +512,7 @@ contract Vault {
             uint256 lock_
         )
     {
-        return (name, leader, closed, totalShares, value(), sharePrice(), issuePrice(), cashTotal(), shares[leader], LOCK);
+        return (name, description, leader, closed, totalSupply, value(), sharePrice(), issuePrice(), cashTotal(), balanceOf[leader], LOCK);
     }
 
     /// @notice Sub-funds the vault is in: index, tokens owned (free + in sell orders), price they count at.
@@ -468,8 +552,8 @@ contract Vault {
 
     /// @notice One depositor: shares, what they are worth, what was paid in, when they unlock.
     function position(address who) external view returns (uint256 shares_, uint256 worth, uint256 paidIn, uint256 unlock) {
-        shares_ = shares[who];
-        worth = totalShares == 0 ? 0 : (value() * shares_) / totalShares;
+        shares_ = balanceOf[who];
+        worth = totalSupply == 0 ? 0 : (value() * shares_) / totalSupply;
         return (shares_, worth, basis[who], unlockAt[who]);
     }
 }
@@ -490,10 +574,11 @@ contract VaultFactory {
     }
 
     /// @notice Open a vault and become its leader, with a first deposit of your own.
-    function create(string calldata name, uint256 usdcAmount) external returns (Vault vault) {
+    function create(string calldata name, string calldata description, uint256 usdcAmount) external returns (Vault vault) {
         require(bytes(name).length > 0 && bytes(name).length <= 32, "Vaults: name 1 to 32 characters");
+        require(bytes(description).length <= 140, "Vaults: description up to 140 characters");
         require(usdcAmount >= MIN_FIRST_DEPOSIT, "Vaults: first deposit below 100 mUSDC");
-        vault = new Vault(umbrella, msg.sender, name, LOCK);
+        vault = new Vault(umbrella, msg.sender, name, description, LOCK);
         require(
             IERC20ForVault(IUmbrellaForVault(umbrella).usdc()).transferFrom(msg.sender, address(vault), usdcAmount),
             "Vaults: usdc transfer failed"

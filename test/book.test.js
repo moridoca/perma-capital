@@ -248,10 +248,10 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     ok('GP revaluation +20% NAV: every rung and the issue price move with it (top bid 1.1976, issue 1.2024) without a transaction; holders\' orders keep their price')
   }
 
-  // ---------- floor of the band and the rule-based buyback ----------
+  // ---------- bottom of the ladder; surplus pot, buyback and dividend by GP proposal and holder vote ----------
   await reset()
   {
-    await fails(fund.connect(carol).buyback(U(100), []), 'Fund: discount below trigger')
+    const s0 = await fund.surplus()
     // Bob sells until the ladder has no bids left
     const l = await lad(), all = M.bookSell(U(300000), l, [])
     await send(book.connect(bob).sell(U(300000), 0, []))
@@ -259,19 +259,73 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     assert((await book.inventory())[1] < 500n, 'ladder cash used up (dust only)')
     const nav = await fund.navPerToken()
     assert.strictEqual(await fund.marketPrice(), (nav * 5010n) / 10000n, 'bottom rung offers at NAV -49.9%')
-    assert.strictEqual(await fund.buybackTriggerPrice(), (nav * 9000n) / 10000n)
     await fails(book.connect(bob).sell(U(100), 0, []), 'Book: nothing to sell into')
-    const max = await fund.maxBuyback()
-    await fails(fund.connect(carol).buyback(max + 1n, []), 'Fund: amount above limit')
+    const surplus = await fund.surplus()
+    assert.strictEqual(surplus - s0, all.fee, 'the taker fee of the sale is in the surplus pot')
+    assert.strictEqual(await fund.freeCash(), (await fund.vaultCash()) - surplus)
+    await fails(fund.deployCapital(eve.address, (await fund.freeCash()) + 1n, 'too much'), 'Fund: above free vault cash')
+
+    // nothing leaves the pot without a GP proposal and a holder vote
+    await fails(fund.connect(carol).buyback(U(1), []), 'Fund: only GP')
+    await fails(fund.buyback(U(1), []), 'Fund: above approved surplus')
+    await fails(fund.payDividend(U(1)), 'Fund: above approved surplus')
+    await fails(fund.connect(alice).proposeSurplusUse(1, U(1)), 'Fund: only GP')
+    await fails(fund.proposeSurplusUse(1, surplus + 1n), 'Fund: above the surplus')
+    await fails(fund.proposeSurplusUse(0, U(1)), 'Fund: unknown kind')
+    const forBuyback = (surplus * 6n) / 10n, forDividend = (surplus * 3n) / 10n
+    const vote = async (kind, amount) => {
+      await send(fund.proposeSurplusUse(kind, amount)); const id = await fund.issueProposalId()
+      assert.strictEqual(await fund.issueKind(), BigInt(kind))
+      await send(fund.connect(alice).voteIssuance(U(520000))); await send(fund.connect(dave).executeIssuance()); await send(fund.connect(alice).withdrawIssuanceVotes(id))
+    }
+    const ia = await fund.issuanceApproved()
+    await vote(1, forBuyback)
+    assert.strictEqual(await fund.buybackApproved(), forBuyback); assert.strictEqual(await fund.issuanceApproved(), ia, 'a surplus vote approves no new tokens')
+    await fails(fund.proposeSurplusUse(2, surplus - forBuyback + 1n), 'Fund: above the surplus')
     const [ts0, vc0, navB] = await Promise.all([token.totalSupply(), fund.vaultCash(), fund.navPerToken()])
-    await send(fund.connect(carol).buyback(max, []))
-    const [ts1, vc1, navA, l2] = await Promise.all([token.totalSupply(), fund.vaultCash(), fund.navPerToken(), lad()])
-    assert(ts1 < ts0, 'tokens burned'); assert(vc0 - vc1 <= max && vc0 - vc1 > (max * 9990n) / 10000n, "about the full amount left the vault (the fee comes back to it)")
-    assert(navA >= navB, 'NAV per token not lowered: ' + navB + ' -> ' + navA)
-    assert(l2.cash[0] > 0n, 'vault cash now bids on the lowest rung')
-    await fails(fund.connect(carol).buyback(U(10), []), 'Fund: buyback cooldown')
+    await fails(fund.buyback(forBuyback + 1n, []), 'Fund: above approved surplus')
+    await send(fund.buyback(forBuyback, []))
+    const [ts1, vc1, navA, l2, s1] = await Promise.all([token.totalSupply(), fund.vaultCash(), fund.navPerToken(), lad(), fund.surplus()])
+    assert(ts1 < ts0, 'tokens burned'); assert(navA >= navB, 'NAV per token not lowered: ' + navB + ' -> ' + navA)
+    assert(l2.cash[0] > 0n, 'the money now bids on the lowest rung')
+    assert.strictEqual(vc0 - vc1, surplus - s1, 'only surplus money left the vault (the fee on the purchase came back into the pot)')
+    assert((await fund.buybackApproved()) < forBuyback / 100n + 2n, 'approval used up')
     await invariant('buyback')
-    ok('selling through all 250 bids ends at the bottom of the ladder (NAV -49.9%); the buyback is open from NAV -10% down; buyback burns ' + f6(ts0 - ts1) + ' tokens and refills the lowest rung; NAV per token ' + f6(navB) + ' -> ' + f6(navA))
+
+    // dividend: approved by holders, paid by the GP, collected by each holder
+    await vote(2, forDividend)
+    assert.strictEqual(await fund.dividendApproved(), forDividend)
+    const na0 = await fund.netAssets()
+    const entitled = (await token.totalSupply()) - (await token.balanceOf(bookAddr)) - (await token.balanceOf(fundAddr)) - (await token.balanceOf(await w.vesting.getAddress()))
+    await fails(fund.connect(alice).payDividend(forDividend), 'Fund: only GP')
+    await send(fund.payDividend(forDividend))
+    const per = (forDividend * 10n ** 18n) / entitled, paid = (per * entitled) / 10n ** 18n
+    assert.strictEqual(await fund.dividendsUnclaimed(), paid); assert.strictEqual(await fund.netAssets(), na0 - paid, 'a declared dividend is no longer part of net assets')
+    assert.strictEqual(await fund.surplus(), s1 - paid)
+    const bobBal = await token.balanceOf(bob.address), owedBob = (bobBal * per) / 10n ** 18n
+    assert.strictEqual(await fund.dividendOf(bob.address), owedBob); assert.strictEqual(await fund.dividendOf(bookAddr), 0n, 'tokens in the book get nothing')
+    // tokens sold after the payment leave the dividend with the seller
+    await send(token.connect(bob).transfer(dave.address, bobBal))
+    assert.strictEqual(await fund.dividendOf(bob.address), owedBob); assert.strictEqual(await fund.dividendOf(dave.address), 0n)
+    const u0 = await usdc.balanceOf(bob.address)
+    await send(fund.connect(carol).claimDividend(bob.address)) // anyone can trigger it; the money goes to the holder
+    assert.strictEqual((await usdc.balanceOf(bob.address)) - u0, owedBob)
+    await fails(fund.claimDividend(bob.address), 'Fund: nothing to collect')
+    await send(fund.claimDividend(alice.address)); await send(fund.claimDividend(carol.address))
+    assert((await fund.dividendsUnclaimed()) < 10n, 'all collected but rounding dust')
+    await invariant('dividend')
+    ok('selling through all 250 bids ends at the bottom of the ladder (NAV -49.9%); fees collect in a surplus pot (' + f6(surplus) + ' mUSDC); buyback and dividend need a GP proposal and a holder vote: buyback burns ' + f6(ts0 - ts1) + ' tokens, NAV per token ' + f6(navB) + ' -> ' + f6(navA) + '; dividend of ' + f6(paid) + ' mUSDC paid per token in a wallet and collected')
+  }
+  await reset()
+  {
+    // what the ladder earns on a round trip can be moved into the pot
+    await send(book.connect(bob).sell(U(2000), 0, [])); await send(book.connect(alice).buy(U(1900), 0, []))
+    const [inv0, s0, na0] = await Promise.all([book.inventory(), fund.surplus(), fund.netAssets()])
+    await send(fund.connect(dave).sweepLadder())
+    const [inv1, s1, na1] = await Promise.all([book.inventory(), fund.surplus(), fund.netAssets()])
+    assert(s1 > s0 && s1 - s0 === inv0[1] - inv1[1], 'what left the rungs is in the pot'); assert.strictEqual(na1, na0, 'net assets unchanged')
+    await invariant('sweep')
+    ok('the ladder\'s profit from a sale and repurchase (' + f6(s1 - s0) + ' mUSDC) moves into the surplus pot with sweepLadder(); rungs keep their share of 5% of net assets')
   }
 
   // ---------- trading account with a session key ----------

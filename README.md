@@ -76,8 +76,9 @@ selector, five sections, and a tab bar on phones.
 **Vaults.** Anyone can open a vault, put in at least 100 mUSDC of their own and trade it
 by any strategy in the order books of this umbrella, as with the user vaults on
 Hyperliquid. Others deposit and share the result. The leader gets 10% of a depositor's
-profit, must own at least 5% of the vault, and can only trade; money leaves a vault by
-redeeming shares, paid as the same fraction of everything the vault holds. Vaults are
+profit, must own at least 5% of the vault, and can only trade. Deposits and withdrawals
+are in mUSDC: a withdrawal takes the depositor's fraction of the cash and sells the same
+fraction of every position at market. Shares are a token. Vaults are
 separate from the funds' own bid ladders. Rules and limits: `contracts/perma/README.md`.
 The tab shows a note until a `VaultFactory` address is entered in `docs/config.js`.
 
@@ -130,9 +131,9 @@ The numbers are from a run of exactly these steps on a local chain.
 | 4 | Funds, Manager: deploy capital, 600,000 | NAV stays $1.00; vault cash 350,000 |
 | 5 | Trade: buy for 5,000 mUSDC | "Nothing on offer": no holder sells, and new tokens need a holder vote. The GP proposes an amount under Funds, Manager; the GP cannot vote, so approving it takes a second wallet that holds tokens (Govern) |
 | 6 | Trade: Limit, sell 10,000 at 1.0010 | Rests in the book below the issue price, marked "you"; listed under Open orders |
-| 7 | Trade: Market, sell 25,000 | The ladder takes all of it over 62 rungs at an average of $0.9380. Market $0.8779, NAV $1.0016, discount 12.3%: past the −10% mark, so the buyback is open |
-| 8 | Funds, Rules: trigger the buyback (empty = maximum) | 3,500 mUSDC from the vault (1% of vault cash) buy 3,931 pBUY off the lowest rungs and burn them; the cash now bids there. Market $0.9019, discount 9.9% |
-| 9 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1554. Every rung moves with it (top bid $1.1531, lowest bid $0.5777). The limit order at $1.0010 keeps its price and is now the cheapest offer in the book |
+| 7 | Trade: Market, sell 25,000 | The ladder takes all of it over 62 rungs at an average of $0.9380. Market $0.8779, NAV $1.0016, discount 12.3%. The 16.43 mUSDC fee is in the surplus pot |
+| 8 | Funds, Manager: propose a buyback or a dividend | The GP can ask for at most what is in the surplus pot. Like new tokens, it needs a yes from more than 50% of eligible supply, so a second wallet that holds tokens (Govern). After approval the GP buys back (only below NAV) or pays the dividend; holders collect it under Govern |
+| 9 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1554, market $1.0127. Every rung moves with it (top bid $1.1531, lowest bid $0.5777). The limit order at $1.0010 keeps its price and is now the cheapest offer in the book |
 | 10 | Funds, Rules, after one demo year: mint the fee tranche | 2% of supply in new tokens, locked in vesting |
 
 ### Variant: sell out the whole sale first
@@ -145,12 +146,11 @@ the GP) can close the sale. Numbers from a local run with one non-GP wallet:
 | 1 | Portfolio: get test mUSDC, 9,500,000 | Wallet funded |
 | 2 | Trade: primary sale, 9,500,000 | Sale sold out; the close button opens for every wallet |
 | 3 | Trade: close the sale, open the market | 475,000 mUSDC become fund-owned liquidity (3,800 on each of the first 50 bid rungs, 2,850 on the next 50, 950 on each of the 150 below); vault cash 9,025,000; NAV $1.00, market $0.9980 (top bid) |
-| 4 | Trade: sell 250,000 | The book takes all of it at an average of $0.9346. Market $0.8700, NAV $1.0018, discount 13.2%: buyback open |
-| 5 | Funds, Rules: trigger the buyback, field empty | 90,252 mUSDC (1% of vault cash) buy and burn 100,206 pBUY; market up to $0.9261 |
+| 4 | Trade: sell 250,000 | The book takes all of it at an average of $0.9346. Market $0.8700, NAV $1.0018, discount 13.2%. Surplus pot: 163.68 mUSDC of fees |
 
 The ladder is deeper here: 3,800 mUSDC on each of the top rungs instead of 400, so it takes
-a larger sale to move the price. The buyback opens once the market is 10% or more below NAV
-and buys at the lowest prices on offer, which are below NAV by then.
+a larger sale to move the price. A buyback is no longer a rule anyone can trigger: it is paid
+from the surplus pot, proposed by the GP and approved by holders.
 
 The contract does not force a sell-out: the GP can still close early once anything is
 sold. Enforcing it would mean changing `closeSale` and deploying again.
@@ -193,5 +193,5 @@ about 1,560 gas per byte of contract code.
 ## Known limits
 
 See `contracts/perma/README.md`. In short: the GP-reported investment value is a trust
-assumption, the buyback can be front-run within its 1% cap, there is no whitelist and no
+assumption, a buyback can be front-run, there is no whitelist and no
 identity check, and nothing has been audited.
