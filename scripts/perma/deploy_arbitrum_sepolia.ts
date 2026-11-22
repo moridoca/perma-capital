@@ -6,7 +6,7 @@
 //      Arbitrum Sepolia for gas: a faucet, or bridge SepoliaETH at bridge.arbitrum.io.
 //   3. Deploy & Run tab: choose the MetaMask (browser extension) environment.
 //   4. Right-click this file -> Run. MetaMask asks for one confirmation per
-//      transaction: 5 deployments + 1 per sub-fund (8 in total).
+//      transaction: 6 deployments + 1 per sub-fund (9 in total).
 //
 // The script refuses to run on any chain other than Arbitrum Sepolia.
 // Addresses are printed and saved to scripts/perma/arbitrum-sepolia-deployment.json.
@@ -21,6 +21,8 @@ const CHAIN_ID = 421614
 // Demo clock. Production values would be 31536000 (365 days) and 604800 (7 days).
 const YEAR_SECONDS = 300
 const VOTING_SECONDS = 180
+// Lock on a vault deposit. Production would be 86400 (one day).
+const VAULT_LOCK_SECONDS = 120
 
 const SUB_FUNDS = [
   ['Perma Buyout', 'pBUY'],
@@ -35,7 +37,8 @@ const EXISTING = {
   components: '',
   fundDeployer: '',
   umbrella: '',
-  tradingAccounts: ''
+  tradingAccounts: '',
+  vaults: ''
 }
 
 const OUT_FILE = 'scripts/perma/arbitrum-sepolia-deployment.json'
@@ -108,6 +111,7 @@ const artifact = async (name: string) => {
     )
 
     const tradingAccounts = await deployOrAttach('TradingAccountFactory', [addrOf(umbrella)], EXISTING.tradingAccounts)
+    const vaults = await deployOrAttach('VaultFactory', [addrOf(umbrella), VAULT_LOCK_SECONDS], EXISTING.vaults)
     const startBlock = Number(await provider.getBlockNumber())
     const launched = Number(await umbrella.subFundCount())
     for (let i = launched; i < SUB_FUNDS.length; i++) {
@@ -128,6 +132,8 @@ const artifact = async (name: string) => {
       fundDeployer: addrOf(fundDeployer),
       umbrella: addrOf(umbrella),
       tradingAccounts: addrOf(tradingAccounts),
+      vaults: addrOf(vaults),
+      vaultLockSeconds: VAULT_LOCK_SECONDS,
       subFunds: []
     }
     const count = Number(await umbrella.subFundCount())
@@ -149,7 +155,7 @@ const artifact = async (name: string) => {
       console.log('  could not save ' + OUT_FILE + ' - copy the addresses above')
     }
     console.log('=== Deployment finished. UmbrellaFactory: ' + addrOf(umbrella) + ' ===')
-    console.log('docs/config.js, network "arbitrum": umbrella ' + addrOf(umbrella) + ', usdc ' + addrOf(usdc) + ', tradingAccounts ' + addrOf(tradingAccounts) + (launched === 0 ? ', deployBlock ' + startBlock : ''))
+    console.log('docs/config.js, network "arbitrum": umbrella ' + addrOf(umbrella) + ', usdc ' + addrOf(usdc) + ', tradingAccounts ' + addrOf(tradingAccounts) + ', vaults ' + addrOf(vaults) + (launched === 0 ? ', deployBlock ' + startBlock : ''))
   } catch (e: any) {
     console.log('DEPLOYMENT FAILED: ' + (e && e.message ? e.message : e))
   }

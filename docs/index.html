@@ -19,7 +19,7 @@
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('vendor/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 600; font-display: swap; src: url('vendor/fonts/jetbrains-mono-latin-600-normal.woff2') format('woff2'); }
 </style>
-<link rel="stylesheet" href="perma.css?v=5">
+<link rel="stylesheet" href="perma.css?v=6">
 <style>
 /* Additions to the PERMA design system for the live Sepolia dashboard. */
 html { -webkit-text-size-adjust: 100%; }
@@ -126,6 +126,12 @@ main > section, .view { display: flex; flex-direction: column; gap: 22px; min-wi
       <div id="reports" class="view"></div>
     </section>
 
+    <!-- Vaults -->
+    <section data-view="vaults" hidden>
+      <div id="vl" class="view"></div>
+      <div id="act-vault" class="vgrid"></div>
+    </section>
+
     <!-- Portfolio -->
     <section data-view="portfolio" hidden>
       <div id="pf" class="view"></div>
@@ -147,10 +153,10 @@ main > section, .view { display: flex; flex-direction: column; gap: 22px; min-wi
 </div>
 <div id="fpanel" hidden></div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-<nav class="tabs" aria-label="Main sections"><div class="in" id="tabs" style="grid-template-columns:repeat(5,1fr)"></div></nav>
+<nav class="tabs" aria-label="Main sections"><div class="in" id="tabs" style="grid-template-columns:repeat(6,1fr)"></div></nav>
 
 <script src="vendor/ethers.umd.min.js"></script>
 <script src="config.js?v=15"></script>
-<script src="app.js?v=15"></script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

@@ -16,6 +16,8 @@ separate sub-funds that are issued once and never wound up. University prototype
 | `scripts/perma/demo.ts` | End-to-end demo for the Remix VM (about three minutes, several accounts) |
 | `scripts/perma/deploy_sepolia.ts` | Deployment to Sepolia through MetaMask; refuses any other chain |
 | `scripts/perma/sepolia-deployment.json` | All addresses of the live deployment |
+| `scripts/perma/deploy_vaults.ts` | Adds the vault factory to an existing order-book deployment |
+| `test/` | Contract tests on a local chain (`npm test`) |
 | `docs/` | The dashboard: one static page, no backend, no build step (served by GitHub Pages) |
 
 ## Live deployment (Sepolia, chain id 11155111)
@@ -49,6 +51,14 @@ selector, five sections, and a tab bar on phones.
 | Reports | A fund report built from chain data: statement of net assets, capital account since launch, investments and valuations, manager fee, your position, event log, contract addresses |
 | Portfolio | The connected wallet: account value, holdings across all funds at market and at NAV, test mUSDC |
 | Govern | Votes to replace a manager, the valuations the GP has reported, the manager of each fund |
+
+**Vaults.** Anyone can open a vault, put in at least 100 mUSDC of their own and trade it
+by any strategy in the order books of this umbrella, as with the user vaults on
+Hyperliquid. Others deposit and share the result. The leader gets 10% of a depositor's
+profit, must own at least 5% of the vault, and can only trade; money leaves a vault by
+redeeming shares, paid as the same fraction of everything the vault holds. Vaults are
+separate from the funds' own bid ladders. Rules and limits: `contracts/perma/README.md`.
+The tab shows a note until a `VaultFactory` address is entered in `docs/config.js`.
 
 **Fast trading.** Orders without a wallet pop-up, like an agent key on Hyperliquid, built so
 that it would also hold for real money (`contracts/perma/TradingAccount.sol`):

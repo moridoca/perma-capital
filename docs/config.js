@@ -28,6 +28,8 @@ window.PERMA_NETWORKS = {
     // sent to each new session key.
     // TradingAccountFactory, deployed 22 Nov 2026 (block 12,185,219).
     tradingAccounts: '0x8Da83E34460378F94f158C38697c7C93B75E51D4',
+    // Vaults: VaultFactory (empty = not deployed here yet).
+    vaults: '',
     // A trade costs well under 0.00003 ETH at these fees, so 0.0005 lasts a demo.
     tkGas: '0.0005',
     tkLow: '0.00005',
@@ -57,6 +59,7 @@ window.PERMA_NETWORKS = {
     // The cap only has to stay above it; a lower cap means less gas has to sit in the trading key.
     fees: { priorityGwei: '0', maxGwei: '0.2' },
     tradingAccounts: '0x12acA0B765732b7db6484bf8844bBD21d394e3bF',
+    vaults: '',
     tkGas: '0.002',
     // Lets MetaMask add the network if it does not know it yet.
     addChain: {

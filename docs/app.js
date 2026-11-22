@@ -129,6 +129,25 @@
     'function buyPrimary(uint256 fundIndex, uint256 tokenAmount)',
     'function withdrawToOwner(address token, uint256 amount)'
   ]
+  ABI.vault = [
+    'function info() view returns (string name, address leader, bool closed, uint256 totalShares, uint256 value, uint256 sharePrice, uint256 issuePrice, uint256 cash, uint256 leaderShares, uint256 lock)',
+    'function positions() view returns (uint256[] index, uint256[] tokens, uint256[] prices)',
+    'function openOrders() view returns (uint256[] fundIndex, uint256[] ids, bool[] isBuy, uint256[] prices, uint256[] tokens)',
+    'function position(address who) view returns (uint256 shares, uint256 worth, uint256 paidIn, uint256 unlock)',
+    'function deposit(uint256 usdcAmount, uint256 minShares) returns (uint256)',
+    'function redeem(uint256 shareAmount) returns (uint256)',
+    'function buy(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut, uint256[] ids) returns (uint256, uint256)',
+    'function sell(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut, uint256[] ids) returns (uint256, uint256)',
+    'function limitBuy(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] ids) returns (uint256 id, uint256 filled)',
+    'function limitSell(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] ids) returns (uint256 id, uint256 filled)',
+    'function cancel(uint256 fundIndex, uint256 id)',
+    'function close()'
+  ]
+  ABI.vaults = [
+    'function count() view returns (uint256)',
+    'function vaults(uint256) view returns (address)',
+    'function create(string name, uint256 usdcAmount) returns (address)'
+  ]
   ABI.accounts = [
     'function accountOf(address) view returns (address)',
     'function create(address key, uint64 expiry, uint128 volumeCap, uint16 maxPremiumBps, uint16 maxDiscountBps) payable returns (address)'
@@ -137,7 +156,7 @@
 
   const state = {
     rpcIndex: 0, provider: null,
-    funds: [], selected: 0, detail: null, me: null, sym: {},
+    funds: [], selected: 0, detail: null, me: null, sym: {}, vaults: [], vsel: 0,
     tab: 'trade', sub: 'overview', range: 'All', pane: 'book', ttab: 'balances', side: 'buy', otype: 'market', fsel: false, ff: 'all', fq: '',
     year: 0, voting: 0,
     block: 0, chainTime: 0, fetchedAt: 0,
@@ -240,6 +259,24 @@
       f.symbol = state.sym[f.token] = lite[o + LITE.length]
     })
     return funds
+  }
+
+  // Vaults: pools of mUSDC that their leaders trade in the order books (contracts/perma/Vault.sol).
+  async function loadVaults(p) {
+    if (!CFG.vaults) return []
+    const fac = new E.Contract(CFG.vaults, ABI.vaults, p)
+    const n = Math.min(Number(await fac.count()), 40)
+    const addrs = await Promise.all(Array.from({ length: n }, (_, i) => fac.vaults(i)))
+    return Promise.all(addrs.map(async (a) => {
+      const v = new E.Contract(a, ABI.vault, p)
+      const [i, pos, ord, mine] = await Promise.all([v.info(), v.positions(), v.openOrders(), state.account ? v.position(state.account) : null])
+      return {
+        addr: a, name: i[0], leader: i[1], closed: i[2], shares: i[3], value: i[4], price: i[5], issue: i[6], cash: i[7], leaderShares: i[8], lock: Number(i[9]),
+        pos: [...pos[0]].map((x, k) => ({ fund: Number(x), tokens: pos[1][k], price: pos[2][k] })),
+        orders: [...ord[0]].map((x, k) => ({ fund: Number(x), id: ord[1][k], isBuy: ord[2][k], price: ord[3][k], tokens: ord[4][k] })).filter((o) => o.tokens > 0n),
+        me: mine ? { shares: mine[0], worth: mine[1], paid: mine[2], unlock: Number(mine[3]) } : null
+      }
+    }))
   }
 
   const FUND_KEYS = ['gp', 'saleClosed', 'sold', 'initialSupply', 'investedValue', 'feeTranchesMinted', 'lastFeeMint',
@@ -350,11 +387,14 @@
       const f = funds[idx]
       const [d, blk] = await Promise.all([read((p) => loadDetail(p, f)), read((p) => p.getBlock('latest'))])
       const me = await read((p) => loadMe(p, funds, d, idx))
+      let vaults = state.vaults
+      try { vaults = await read(loadVaults) } catch (e) { console.warn('PERMA: vaults not read:', e) }
       try { await read((p) => scanLogs(p, idx, f, bn)); state.scan[idx].failed = false } catch (e) {
         if (state.scan[idx]) state.scan[idx].failed = true
       }
       if (idx !== state.selected || gen !== state.gen) return // selection changed or a newer refresh took over
       state.funds = funds; state.detail = d; state.me = me; state.shown = idx
+      state.vaults = vaults; if (state.vsel >= vaults.length) state.vsel = 0
       state.block = bn; state.chainTime = Number(blk.timestamp); state.fetchedAt = Date.now()
       if (d.saleClosed) {
         const live = state.live[idx] || (state.live[idx] = [])
@@ -435,10 +475,11 @@
   const PUT = (id) => ({ set h(html) { const el = $(id); if (el.__h !== html) { el.innerHTML = html; el.__h = html } } })
 
   // ---------- top bar ----------
-  const TABS = [['trade', 'Trade'], ['funds', 'Funds'], ['reports', 'Reports'], ['portfolio', 'Portfolio'], ['govern', 'Govern']]
+  const TABS = [['trade', 'Trade'], ['funds', 'Funds'], ['vaults', 'Vaults'], ['reports', 'Reports'], ['portfolio', 'Portfolio'], ['govern', 'Govern']]
   const ICON = {
     trade: '<path d="M4 19V9M9 19V5M14 19v-7M19 19V8"/>',
     funds: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><rect x="3" y="11" width="18" height="5" rx="1.5"/><path d="M5 20h14"/>',
+    vaults: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M12 9v-1.5M12 16.5V15M9 12H7.5M16.5 12H15"/>',
     reports: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>',
     portfolio: '<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5V12l6 6"/>',
     govern: '<path d="M4 20h16M6 20V10M10 20V10M14 20V10M18 20V10M3 10l9-6 9 6z"/>'
@@ -449,7 +490,7 @@
     PUT('topnav').h = TABS.map((t) => tabBtn(t, false)).join('')
     PUT('tabs').h = TABS.map((t) => tabBtn(t, true)).join('')
     document.querySelectorAll('main > section').forEach((s) => { s.hidden = s.dataset.view !== state.tab })
-    $('view').classList.toggle('wide', state.tab === 'trade' || state.tab === 'reports' || state.tab === 'portfolio')
+    $('view').classList.toggle('wide', state.tab === 'trade' || state.tab === 'reports' || state.tab === 'portfolio' || state.tab === 'vaults')
     const f = cur()
     if (f) {
       const live = f.price > 0n
@@ -935,6 +976,43 @@
           : '<p class="note pfpad">No fund tokens in this wallet yet. Get test mUSDC below, then buy in a primary sale or in an order book.</p>') + '</div></div></section>'
     }
     PUT('pf').h = h
+  }
+
+  // ---------- Vaults ----------
+  const curV = () => state.vaults[state.vsel]
+  const isLeader = () => { const v = curV(); return !!v && !!state.account && v.leader.toLowerCase() === state.account.toLowerCase() }
+  const symOf = (i) => (state.funds[i] ? state.funds[i].symbol : 'fund ' + i)
+  function renderVaults() {
+    const vs = state.vaults
+    let h = '<section class="pfhead"><div><h1>Vaults</h1><p class="lead">Anyone can open a vault and trade it by their own strategy in the order books of this umbrella. Depositors share the result. The leader gets 10% of a depositor\'s profit, must own at least 5% of the vault, and can only trade, at no more than 5% above NAV and no less than 55% below it. Money leaves a vault by redeeming shares, paid as the same fraction of everything it holds. Vaults are separate from the funds\' own bid ladders.</p></div></section>'
+    if (!CFG.vaults) h += '<div class="tp pfnone">Vaults are not deployed on ' + esc(CFG.network) + ' yet.</div>'
+    else if (!vs.length) h += '<div class="tp pfnone">No vault yet. Open the first one below.</div>'
+    else {
+      const share = (v) => (v.shares > 0n ? (Number((v.leaderShares * 10000n) / v.shares) / 100).toFixed(1) + '%' : '–')
+      h += '<div class="tp pftabs"><div class="ttabs"><button aria-pressed="true">All vaults</button></div><div class="pftb"><table class="tt"><thead><tr><th class="l">Vault</th><th class="l">Leader</th><th>Value</th><th>Share price</th><th>Since start</th><th>Leader owns</th><th>Your shares</th><th>Your value</th><th></th></tr></thead><tbody>' +
+        vs.map((v, i) => '<tr class="click" data-vault="' + i + '"' + (i === state.vsel ? ' aria-selected="true"' : '') + '><td class="l"><b>' + esc(v.name) + '</b></td><td class="l">' + link(v.leader) + '</td><td>$' + cmp(num(v.value)) + '</td><td>' + num(v.price).toFixed(4) +
+          '</td><td class="' + (v.price >= U6 ? 'up' : 'dn') + '">' + pcs(num(v.price) - 1) + '</td><td>' + share(v) + '</td><td>' + (v.me && v.me.shares > 0n ? amt(v.me.shares) : '–') + '</td><td>' + (v.me && v.me.shares > 0n ? '$' + cmp(num(v.me.worth)) : '–') +
+          '</td><td>' + (v.closed ? '<span class="pill warn">closed</span>' : i === state.vsel ? '<span class="pill live">selected</span>' : '') + '</td></tr>').join('') + '</tbody></table></div></div>'
+      const v = curV()
+      const stat = (k, val, sub) => '<div class="pfs"><span>' + k + '</span><b class="num">' + val + '</b>' + (sub ? '<small class="num">' + sub + '</small>' : '') + '</div>'
+      const mine = v.me && v.me.shares > 0n ? v.me : null
+      const left = mine ? Math.max(0, mine.unlock - now()) : 0
+      h += '<section class="pfgrid"><div class="pfcol tp">' + stat(esc(v.name), '$' + cmp(num(v.value)), 'tokens at the lower of market price and NAV') +
+        stat('Share price', num(v.price).toFixed(4), 'new shares cost ' + num(v.issue).toFixed(4)) + stat('Cash', '$' + cmp(num(v.cash)), 'mUSDC, incl. open buy orders') +
+        stat('Leader owns', share(v), link(v.leader)) + stat('Deposit lock', dur(v.lock), v.closed ? 'closed: no lock' : 'after each deposit') +
+        stat('Your shares', mine ? amt(mine.shares) : '–', mine ? 'worth $' + cmp(num(mine.worth)) + ' · paid in $' + cmp(num(mine.paid)) : (state.account ? 'none yet' : 'no wallet connected')) +
+        stat('Your result', mine ? pcs(num(mine.paid) ? num(mine.worth) / num(mine.paid) - 1 : null) : '–', mine ? (v.closed || left <= 0 ? 'redeemable now' : 'unlocks in ' + dur(left)) : '') + '</div>' +
+        '<div class="tp pftabs"><div class="ttabs"><button aria-pressed="true">Holdings of ' + esc(v.name) + '</button></div><div class="pftb">' +
+        '<table class="tt"><thead><tr><th class="l">Asset</th><th>Amount</th><th>Counted at</th><th>Value</th><th>Share of vault</th></tr></thead><tbody>' +
+        [['mUSDC', v.cash, U6]].concat(v.pos.map((p) => [symOf(p.fund), p.tokens, p.price])).map((r) => { const val = (r[1] * r[2]) / U6
+          return '<tr><td class="l"><b>' + esc(r[0]) + '</b></td><td>' + amt(r[1]) + '</td><td>' + num(r[2]).toFixed(4) + '</td><td>$' + cmp(num(val)) + '</td><td>' + (v.value > 0n ? (Number((val * 10000n) / v.value) / 100).toFixed(1) + '%' : '–') + '</td></tr>' }).join('') + '</tbody></table>' +
+        (v.orders.length ? '<table class="tt"><thead><tr><th class="l">Open order</th><th class="l">Fund</th><th class="l">Side</th><th>Limit price</th><th>Open size</th><th></th></tr></thead><tbody>' +
+          v.orders.map((o) => '<tr data-a="vcancel"><td class="l">#' + o.id + '</td><td class="l">' + esc(symOf(o.fund)) + '</td><td class="l ' + (o.isBuy ? 'up' : 'dn') + '">' + (o.isBuy ? 'Buy' : 'Sell') + '</td><td>' + num(o.price).toFixed(4) + '</td><td>' + amt(o.tokens) +
+            '</td><td><input type="hidden" data-k="fi" value="' + o.fund + '"><input type="hidden" data-k="id" value="' + o.id + '"><button class="tlink go"' + (isLeader() ? '' : ' hidden') + '>Cancel</button></td></tr>').join('') + '</tbody></table>'
+          : '<p class="note pfpad">No open orders.</p>') +
+        '</div></div></section>'
+    }
+    PUT('vl').h = h
   }
 
   // ---------- Govern ----------
@@ -1505,6 +1583,74 @@
       why: (d, m) => m && m.escrowed === 0n ? 'You have no tokens locked.' : d.voteActive ? 'The vote is still running.' : '',
       steps: async (c) => [['Withdrawing locked votes', c.fund, 'withdrawVotes', [c.d.proposalId]]] }
   ]
+  // Vault actions. The leader trades in the sub-fund chosen in the top bar.
+  const SHARES = (k) => ({ k, ph: '0', type: 'amount', unit: 'shares' })
+  const vaultOpen = (d) => { const v = curV(); return !v ? 'Choose a vault above.' : v.closed ? 'This vault is closed.' : '' }
+  const leaderWhy = (d) => vaultOpen(d) || need(isLeader(), 'Only the leader of this vault can trade it.') || marketOpen(d)
+  const redeemParts = (v, a) => {
+    const me = v.me
+    if (!me || me.shares === 0n || a > me.shares || v.shares === 0n) return null
+    const worth = (v.value * a) / v.shares, part = (me.paid * a) / me.shares
+    const feeShares = !isLeader() && worth > part ? (a * (((worth - part) * 1000n) / 10000n)) / worth : 0n
+    const burned = a - feeShares
+    return { feeShares, cash: (v.cash * burned) / v.shares, tokens: v.pos.map((p) => [symOf(p.fund), (p.tokens * burned) / v.shares]).filter((t) => t[1] > 0n) }
+  }
+  ACTIONS.push(
+    { id: 'vcreate', tab: 'vault', title: 'Open a vault', lead: 'You become its leader. The first deposit is your own money, at least 100 mUSDC.', btn: 'Open vault',
+      fields: [F.text('n', 'Name, up to 32 characters'), F.usdc('a', 'First deposit')],
+      why: () => need(!!CFG.vaults, 'Vaults are not deployed on this network yet.'),
+      steps: async (c, v) => {
+        if (!v.n || v.n.length > 32) throw new Error('Give the vault a name of 1 to 32 characters.')
+        return [await approval(c, c.usdc, CFG.vaults, v.a, 'mUSDC'), ['Opening the vault ' + v.n, c.vf, 'create', [v.n, v.a]]]
+      } },
+    { id: 'vdeposit', tab: 'vault', title: 'Deposit into the selected vault', btn: 'Deposit', fields: [F.usdc('a')],
+      chips: [{ l: '1k', v: '1000' }, { l: '10k', v: '10000' }, { l: '50k', v: '50000' }],
+      show: () => !!curV(),
+      why: vaultOpen,
+      pre: (d, m, x) => {
+        const v = curV(); if (!v || v.issue === 0n) return ''
+        const sh = (x.a * U6) / v.issue
+        if (!isLeader() && v.leaderShares * 10000n < (v.shares + sh) * 500n) return 'Too large: the leader would own less than 5% of the vault.'
+        return 'About ' + amt(sh) + ' shares at ' + num(v.issue).toFixed(4) + ' · redeemable ' + dur(v.lock) + ' after the deposit'
+      },
+      steps: async (c, x) => { const v = curV(); return [await approval(c, c.usdc, v.addr, x.a, 'mUSDC'), ['Depositing into ' + v.name, c.vault, 'deposit', [x.a, (((x.a * U6) / v.issue) * 99n) / 100n]]] } },
+    { id: 'vredeem', tab: 'vault', title: 'Redeem shares', lead: 'Paid in kind: your fraction of the mUSDC and of every fund token the vault holds.', btn: 'Redeem', fields: [SHARES('a')],
+      chips: [25, 50, 100].map((p) => ({ l: p + '%', get: () => { const v = curV(); return v && v.me ? E.formatUnits((v.me.shares * BigInt(p)) / 100n, D) : '' } })),
+      show: () => !!curV(),
+      why: () => { const v = curV(); if (!v) return 'Choose a vault above.'
+        if (!v.me || v.me.shares === 0n) return 'This wallet has no shares in this vault.'
+        return !v.closed && now() < v.me.unlock ? 'Your deposit unlocks in ' + dur(v.me.unlock - now()) + '.' : '' },
+      pre: (d, m, x) => {
+        const v = curV(), r = v && redeemParts(v, x.a)
+        if (!r) return v && v.me && x.a > v.me.shares ? 'More than this wallet holds (' + amt(v.me.shares) + ' shares).' : ''
+        return 'You receive about ' + amt(r.cash) + ' mUSDC' + r.tokens.map((t) => ' and ' + amt(t[1]) + ' ' + t[0]).join('') +
+          (r.feeShares > 0n ? ' · ' + amt(r.feeShares) + ' shares go to the leader (10% of your profit)' : '') +
+          (isLeader() && !v.closed ? ' · you must keep 5% of the vault' : '')
+      },
+      steps: async (c, x) => [['Redeeming ' + amt(x.a) + ' shares of ' + curV().name, c.vault, 'redeem', [x.a]]] },
+    { id: 'vbuy', tab: 'vault', title: 'Leader: buy for the vault', btn: 'Buy at market', fields: [F.usdc('a')],
+      show: isLeader, why: leaderWhy,
+      pre: (d, m, x) => { const sim = bookBuy(x.a, d.lad, hintsFor(d, true)); return sim.tokens === 0n ? 'Nothing on offer in ' + d.symbol + ' right now.' : 'About ' + amt(sim.tokens) + ' ' + d.symbol + ' at avg ' + usd(((sim.cash + sim.fee) * U6) / sim.tokens) + ' · the vault holds ' + amt(curV().cash) + ' mUSDC' },
+      steps: async (c, x) => { const ids = hintsFor(c.d, true).map((o) => o.id), q = await c.book.quoteBuy(x.a, ids); return [['Buying ' + c.d.symbol + ' for ' + curV().name, c.vault, 'buy', [state.selected, x.a, (q[0] * 99n) / 100n, ids]]] } },
+    { id: 'vsell', tab: 'vault', title: 'Leader: sell for the vault', btn: 'Sell at market', fields: [F.tok('a')],
+      show: isLeader, why: leaderWhy,
+      pre: (d, m, x) => { const sim = bookSell(x.a, d.lad, hintsFor(d, false)); return sim.tokens === 0n ? 'No bids in ' + d.symbol + ' right now.' : 'About ' + amt(sim.cash - sim.fee) + ' mUSDC at avg ' + usd(((sim.cash - sim.fee) * U6) / sim.tokens) },
+      steps: async (c, x) => { const ids = hintsFor(c.d, false).map((o) => o.id), q = await c.book.quoteSell(x.a, ids); return [['Selling ' + c.d.symbol + ' for ' + curV().name, c.vault, 'sell', [state.selected, x.a, (q[0] * 99n) / 100n, ids]]] } },
+    { id: 'vlimitbuy', tab: 'vault', title: 'Leader: limit buy', btn: 'Place buy order', fields: [F.usdc('p', 'Limit price'), F.tok('a', 'Size')],
+      show: isLeader, why: leaderWhy,
+      pre: (d, m, x) => (x.p > 0n ? vsNav(x.p, d.navPerToken) + ' · up to ' + amt((x.a * x.p) / U6) + ' mUSDC · at most 8 open orders per vault' : ''),
+      steps: async (c, x) => [['Placing a limit buy at ' + usd(x.p) + ' for ' + curV().name, c.vault, 'limitBuy', [state.selected, x.a, x.p, hintsFor(c.d, true, x.p).map((o) => o.id)]]] },
+    { id: 'vlimitsell', tab: 'vault', title: 'Leader: limit sell', btn: 'Place sell order', fields: [F.usdc('p', 'Limit price'), F.tok('a', 'Size')],
+      show: isLeader, why: leaderWhy,
+      pre: (d, m, x) => (x.p > 0n ? vsNav(x.p, d.navPerToken) + ' · ' + amt((x.a * x.p) / U6) + ' mUSDC if filled' : ''),
+      steps: async (c, x) => [['Placing a limit sell at ' + usd(x.p) + ' for ' + curV().name, c.vault, 'limitSell', [state.selected, x.a, x.p, hintsFor(c.d, false, x.p).map((o) => o.id)]]] },
+    { id: 'vcancel', title: 'Cancel a vault order', btn: 'Cancel', fields: [F.text('fi'), F.text('id')],
+      why: () => need(isLeader(), 'Only the leader can cancel.'),
+      steps: async (c, v) => [['Cancelling order #' + v.id + ' of ' + curV().name, c.vault, 'cancel', [BigInt(v.fi), BigInt(v.id)]]] },
+    { id: 'vclose', tab: 'vault', title: 'Leader: close the vault', lead: 'Cancels its open orders and ends trading and deposits. Everyone, you included, then redeems without a lock. This cannot be undone.', btn: 'Close the vault', ghost: true, fields: [],
+      show: () => isLeader() && !curV().closed, why: (d) => vaultOpen(d) || need(isLeader(), 'Only the leader can close it.'),
+      steps: async (c) => [['Closing ' + curV().name, c.vault, 'close', []]] }
+  )
   const ACT = Object.fromEntries(ACTIONS.map((a) => [a.id, a]))
   // With a session key, trades go through the trading account; the key holds no funds.
   const SESSION_STEPS = {
@@ -1556,7 +1702,7 @@
       '</div><p class="note pre"></p><p class="qwarn why"></p><button class="ogo b go">Buy at $1.00</button></div>' +
       '<div class="oacct"><div class="oh">Account</div><div id="oacct2"></div><div data-a="faucet"><button class="oclaim go">Get 100,000 test mUSDC</button><p class="qwarn why"></p></div>' +
       '<div data-a="close"><button class="btn ghost sm go" style="width:100%">Close the sale, open the market</button><p class="qwarn why"></p></div></div>'
-    for (const tab of ['gp', 'govern', 'pf']) $('act-' + tab).innerHTML = ACTIONS.filter((x) => x.tab === tab).map((a) => actHtml(a)).join('')
+    for (const tab of ['gp', 'govern', 'pf', 'vault']) $('act-' + tab).innerHTML = ACTIONS.filter((x) => x.tab === tab).map((a) => actHtml(a)).join('')
     $('rules').innerHTML = RULES.map((r) => '<div class="light" data-rule="' + r.k + '"><span class="lamp"></span><div class="grow"><div class="t">' + r.t + '</div><div class="d">' + r.p +
       '</div><div class="st"></div>' + (r.act ? actHtml(ACT[r.act], { inline: true }) : '') + '</div></div>').join('')
     updateActions()
@@ -1650,6 +1796,7 @@
       fund: new E.Contract(f.fund, ABI.fund, s), token: new E.Contract(f.token, ABI.erc20, s),
       book: new E.Contract(f.book, ABI.book, s), vesting: new E.Contract(f.vesting, ABI.vesting, s),
       usdc: new E.Contract(CFG.usdc, ABI.erc20, s),
+      vault: curV() ? new E.Contract(curV().addr, ABI.vault, s) : null, vf: CFG.vaults ? new E.Contract(CFG.vaults, ABI.vaults, s) : null,
       acct: tkOn() ? new E.Contract(state.tk.acct, ABI.account, s) : null
     }
     try {
@@ -1681,7 +1828,7 @@
   function render() {
     renderTop(); renderWallet(); renderTk(); buildActions(false)
     renderHead(); renderChart(); renderBook(); renderBottom(); renderIpo()
-    renderFunds(); renderKpis(); renderRules(); renderReports(); renderPortfolio(); renderGovern()
+    renderFunds(); renderKpis(); renderRules(); renderReports(); renderPortfolio(); renderVaults(); renderGovern()
     updateActions()
   }
 
@@ -1698,6 +1845,7 @@
     const t = e.target
     const tkB = t.closest('[data-tk]'); if (tkB) { if (!tkB.disabled) tkClick(tkB.dataset.tk); return }
     const tabB = t.closest('[data-tab]'); if (tabB) { setTab(tabB.dataset.tab); return }
+    const vRow = t.closest('[data-vault]'); if (vRow && !t.closest('a')) { state.vsel = Number(vRow.dataset.vault); renderVaults(); updateActions(); return }
     if (t.closest('#fbtn') || t.closest('[data-open-funds]')) { state.fsel = !state.fsel; renderTop(); if (state.fsel) { const q = $('f-q'); if (q && window.innerWidth >= 700) q.focus() } return }
     const ff = t.closest('[data-ff]'); if (ff) { state.ff = ff.dataset.ff; $('fpanel').innerHTML = ''; renderTop(); return }
     const fundEl = t.closest('[data-fund]'); if (fundEl) { const i = Number(fundEl.dataset.fund); const go = fundEl.dataset.go; selectFund(i); if (go && state.tab !== go) setTab(go); return }
@@ -1719,7 +1867,8 @@
     if (chip) {
       const c = a.chips[Number(chip.dataset.chip)], m = state.me
       const input = row.querySelector('[data-k="a"]')
-      if (c.v) input.value = c.v
+      if (c.get) input.value = c.get()
+      else if (c.v) input.value = c.v
       else if (m) input.value = E.formatUnits(((c.of === 'usdc' ? m.usdc : m.token) * BigInt(c.pct)) / 100n, D)
       updateActions()
       return

@@ -16,6 +16,8 @@ Prototype for the Remix VM and testnets. mUSDC is play money.
 | FundToken.sol | The sub-fund's share token. Freely transferable ERC-20; only the sub-fund can mint. |
 | OrderBook.sol | Secondary market. Below NAV the fund's cash on a ladder of 250 bid rungs in 0.2% steps down to NAV -50%, each reselling 0.1% higher; above NAV new issuance at NAV +0.2%; plus holders' limit orders. 0.07% taker fee, paid to the fund. |
 | GPVesting.sol | Holds the manager's fee tokens until they vest. |
+| Vault.sol | Leader-run vaults, as on Hyperliquid: anyone opens one, trades it in the order books, others deposit. Separate from the funds' ladders. With VaultFactory. |
+| TradingAccount.sol | Trading account with session keys (fast trading without wallet prompts). With TradingAccountFactory. |
 | Deployers.sol | Two helpers that keep every contract under the 24 KB size limit (EIP-170). |
 | MockUSDC.sol | Test stablecoin with a public faucet. |
 | ERC20.sol | Minimal ERC-20 base, 6 decimals. No external imports. |
@@ -103,6 +105,55 @@ approved tokens last,
 and a sale of 1% of the fund goes through 25 rungs and ends 5% below NAV
 (average price 2.6% below NAV) with the reserve at its 5% start; a sale of 2.6% of
 the fund ends 13% below NAV.
+
+## Vaults
+
+A vault is a pot of mUSDC that one leader trades for its depositors, by any
+strategy the leader likes. It has nothing to do with a sub-fund's ladder: the
+ladder is the fund's own rule-based market making, a vault is a third party
+trading in the same order books.
+
+| Rule | Value | Where |
+|---|---|---|
+| Opening | anyone, with at least 100 mUSDC of their own; the opener is the leader | VaultFactory.create |
+| What the leader can do | market and limit orders in the order books of this umbrella's sub-funds, at most 6 sub-funds and 8 open orders per vault; no transfer out, no other contract | Vault.buy, sell, limitBuy, limitSell, cancel |
+| Price bounds | no fill above NAV +5% on a buy, none below NAV -55% on a sell (the ladder ends at -50%) | MAX_PREMIUM_BPS, MAX_DISCOUNT_BPS |
+| Leader's own stake | at least 5% of the shares; larger deposits by others and smaller holdings by the leader are refused | LEADER_MIN_BPS |
+| Price of new shares | vault value per share with fund tokens at the higher of market price and NAV | issuePrice, deposit |
+| Value shown, profit | fund tokens at the lower of market price and NAV | value, sharePrice |
+| Lock | a deposit can be redeemed one day later (120 seconds in the test deployment) | LOCK |
+| Redemption | in kind: the same fraction of the mUSDC and of every fund token the vault holds; open orders are cancelled only if the free balances do not cover it | redeem |
+| Profit share | 10% of a depositor's profit, moved to the leader in shares at redemption; no management fee | PROFIT_SHARE_BPS |
+| Closing | the leader can close: orders cancelled, no trading, no deposits, redemption without lock | close |
+
+Why two prices. A vault needs a price for the fund tokens it holds, and the
+only prices on-chain are the book's market price and the GP-reported NAV.
+The market price can be moved for one transaction by selling into the ladder
+and buying back (cost about 0.25% of the volume). If shares were issued at
+that price, a depositor could push it down, deposit cheaply and take the
+difference from the other depositors. Issuing at the higher of the two closes
+that. Measuring profit at the lower of the two keeps a leader from buying
+below NAV and collecting a profit share on the paper gain. Redemptions need
+no price at all because they are paid in kind.
+
+What this costs: while a fund trades below NAV, a new depositor pays NAV for
+tokens the market values lower, so entering a vault that is invested costs the
+discount on that part. Hyperliquid has a mark price from an oracle and does
+not have this problem; here there is no oracle.
+
+Other limits:
+
+- The leader decides what is bought. Depositors can lose money, including all
+  of it. A leader can also trade the vault against his own wallet's orders.
+  The price bounds limit what one such trade can take (5% of its size on a
+  buy when nothing cheaper is on offer; on a sell the ladder's bids come
+  first), they do not stop it from being repeated. The 5% stake, the profit
+  share and the depositors' right to leave after a day are what stands
+  against it. This is the same trust a Hyperliquid vault asks for.
+- Both prices follow the GP's NAV report (the market through the ladder).
+- Shares are not transferable and there is no vault-level governance.
+- Opening a vault costs about 3.6 million gas, a deposit 127,000, a market
+  order through a vault 316,000, a redemption 180,000 (local chain).
 
 ## Run the demo
 
