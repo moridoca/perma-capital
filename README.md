@@ -20,7 +20,28 @@ separate sub-funds that are issued once and never wound up. University prototype
 | `test/` | Contract tests on a local chain (`npm test`) |
 | `docs/` | The dashboard: one static page, no backend, no build step (served by GitHub Pages) |
 
-## Live deployment (Sepolia, chain id 11155111)
+## Live deployment (Arbitrum Sepolia, chain id 421614)
+
+The current contracts (order book with NAV ladder, vaults), deployed 22 Nov 2026. This is
+the network the dashboard opens with.
+
+| Contract | Address |
+|---|---|
+| UmbrellaFactory | `0xc110e67ee8e3208c17838CAD1942fA1f6A3EDF33` |
+| MockUSDC | `0xc442a797F44733F986B29aaE9Befb116CFd4aA44` |
+| TradingAccountFactory (fast trading) | `0x18C32CBE6C0eB77241Acd515a424Ac1A25d27eA2` |
+| VaultFactory | `0xe7D06EBF104B2994d59d6A02e3E446fD6F09726C` |
+| Perma Buyout (pBUY) | `0x4982A07065b1DEB59eB8b2B8Bc5cA72d7323a465` |
+| Perma Growth (pGRO) | `0xD31a163a618192b3A79962a5d380f6E7A331C414` |
+| Perma Agriculture (pAGR) | `0x89a8845642099c232EeFf9C07Bb390341A45aFeC` |
+
+All addresses: `scripts/perma/arbitrum-sepolia-deployment.json`.
+
+## Earlier deployment (Sepolia, chain id 11155111)
+
+Still the first version with a constant-product pool instead of the order book. The
+dashboard reads it under `?net=sepolia` and says so; trading there needs a redeployment
+with `scripts/perma/deploy_sepolia.ts`.
 
 | Contract | Address |
 |---|---|
@@ -141,7 +162,7 @@ on his own removal, so the governance steps need a second wallet that holds toke
 
 Same contracts on Arbitrum's testnet, where a block comes every ~0.3 s instead of every
 12 s on Sepolia. The chip next to the logo switches between the two deployments
-(`?net=sepolia`, `?net=arbitrum`), so both can be compared side by side; the log shows
+(`?net=arbitrum`, the default, and `?net=sepolia`); the log shows
 how long each transaction took.
 
 1. MetaMask: the dashboard offers to add Arbitrum Sepolia (chain id 421614) when you press
@@ -149,15 +170,13 @@ how long each transaction took.
 2. Get ETH on Arbitrum Sepolia from a faucet, or bridge SepoliaETH at
    [bridge.arbitrum.io](https://bridge.arbitrum.io).
 3. Remix: compile as before, MetaMask on Arbitrum Sepolia, run
-   `scripts/perma/deploy_arbitrum_sepolia.ts` (7 confirmations). The script stops on any
+   `scripts/perma/deploy_arbitrum_sepolia.ts` (9 confirmations). The script stops on any
    other chain.
 4. Enter the printed umbrella, mUSDC and deploy block under `arbitrum` in `docs/config.js`.
 
-Deployed on 22 Nov 2026 (block 331,513,588). The deployer used the same nonces as on
-Sepolia, so umbrella, mUSDC and the three sub-funds have the same addresses on both
-networks; only the TradingAccountFactory differs (`0x12acA0B765732b7db6484bf8844bBD21d394e3bF`).
+Redeployed on 22 Nov 2026 with the order book and the vaults (block 331,730,235).
 All addresses: `scripts/perma/arbitrum-sepolia-deployment.json`. The whole deployment
-(8 transactions) cost about 0.00045 ETH.
+(9 transactions) cost about 0.0008 ETH.
 
 ## Running it yourself
 

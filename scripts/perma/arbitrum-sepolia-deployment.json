@@ -1,36 +1,38 @@
 {
   "network": "arbitrum-sepolia",
   "chainId": 421614,
-  "deployBlock": 331513588,
+  "deployBlock": 331730235,
   "gp": "0x4541C852aDdC826ea6D4A1fF6d55e855490FaCc7",
   "yearSeconds": 300,
   "votingSeconds": 180,
-  "usdc": "0x232dA8232534064007557E29A9186240c567B64D",
-  "components": "0x4B93e16FC9d99580A4EB94ff8A5977790Ec62193",
-  "fundDeployer": "0x748148cBe50E7082733E085E295987553A63EF07",
-  "umbrella": "0x15690c82c8aabda3F5689157ebF637A4F5c8e672",
-  "tradingAccounts": "0x12acA0B765732b7db6484bf8844bBD21d394e3bF",
+  "usdc": "0xc442a797F44733F986B29aaE9Befb116CFd4aA44",
+  "components": "0x8Da83E34460378F94f158C38697c7C93B75E51D4",
+  "fundDeployer": "0xDd105cCEe4E015bb42a3EE307ce481b667db791E",
+  "umbrella": "0xc110e67ee8e3208c17838CAD1942fA1f6A3EDF33",
+  "tradingAccounts": "0x18C32CBE6C0eB77241Acd515a424Ac1A25d27eA2",
+  "vaults": "0xe7D06EBF104B2994d59d6A02e3E446fD6F09726C",
+  "vaultLockSeconds": 120,
   "subFunds": [
     {
       "name": "Perma Buyout",
-      "fund": "0x078526Fd41949e907326378794EF47B56d145c47",
-      "token": "0xE8d37e2758f9AC361007893090faDefF3c254902",
-      "pool": "0xcD85A1f33996220Ea297Be3164B5F8172a1e318F",
-      "vesting": "0xE50FB717fF4c728F1B21a3d7412Ba1687110272A"
+      "fund": "0x4982A07065b1DEB59eB8b2B8Bc5cA72d7323a465",
+      "token": "0x3FC2ED9fe663Fb4C3c937723Ce3601e3C46a9FdC",
+      "book": "0x7Ef69Ebb890A3a827564Ca25eC5114c2619C4150",
+      "vesting": "0x54c4F41bFd63db2FfBF2994352dAe40ea678ce45"
     },
     {
       "name": "Perma Growth",
-      "fund": "0x16F1De8877aB2A18eEFE1f49cf3bfDDFD0c469C6",
-      "token": "0xfC7214274F5b80901300Ed394CE7aD46ef3bd258",
-      "pool": "0x5AFbaD710d3201A936f45ceb7A65c797b534d153",
-      "vesting": "0x9271DA9d869C9caF720c7C8ea82E793acfe6B32F"
+      "fund": "0xD31a163a618192b3A79962a5d380f6E7A331C414",
+      "token": "0x9099dDbCF5413E1B8D71F0d976F55a02Cd49DCf9",
+      "book": "0x45254B4d20e4C06899B431d9D019CB70b00f1949",
+      "vesting": "0x098a3d49fD10C892eC5f378cb463c395a709606b"
     },
     {
       "name": "Perma Agriculture",
-      "fund": "0x6D3494e3ab8B6819A6322d4a05D5c66F08cA12BD",
-      "token": "0x4CEb09f72cB5eb571fAddE1e4bF192Ea8E97C86c",
-      "pool": "0xa46CD97530041c4260577cee97AFe912601174Ba",
-      "vesting": "0xf6deeB8341df6542FEF8cEb2A1A1Cf5C76F92dc9"
+      "fund": "0x89a8845642099c232EeFf9C07Bb390341A45aFeC",
+      "token": "0x17d797B1A23FA13d80279AC25F84D5Ae6C79E33a",
+      "book": "0x5Ca2A65a61a176e608EFaCC7144665eDc553d1Fe",
+      "vesting": "0xA3ea1B9EBa7bD6C01541CB437DE2EC2018253948"
     }
   ]
 }
