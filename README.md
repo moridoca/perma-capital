@@ -179,6 +179,27 @@ Redeployed on 22 Nov 2026 with the order book, the surplus pot and the vaults (b
 All addresses: `scripts/perma/arbitrum-sepolia-deployment.json`. The whole deployment
 (9 transactions) cost about 0.0008 ETH.
 
+## Trial: HyperEVM testnet
+
+Order book, vaults and SDK here follow Hyperliquid, so the contracts can also be tried on Hyperliquid's own
+EVM (testnet, chain id 998). `scripts/perma/deploy_hyperevm_testnet.ts` deploys them there. It is a trial,
+not a second home for the dashboard, for three reasons:
+
+- **Two kinds of blocks.** Fast blocks hold 2 million gas, big blocks 30 million about once a minute, and an
+  account sends to one kind or the other. Measured on a local chain, seven of the nine deployment transactions
+  need a big block (launching each of the three sub-funds 8.3 million gas, ComponentDeployer 5.5 million,
+  VaultFactory 5.3 million, SubFundDeployer 4.4 million, TradingAccountFactory 2.9 million), and so does opening a vault
+  later (4.5 million). Ordinary trades fit a fast block; ten orders in one batch (1.9 million) only just.
+- **The switch is not an EVM transaction.** It is an action on HyperCore, sent for example with Hyperliquid's
+  Python SDK (`exchange.use_big_blocks(True)`). A user who wants to open a vault would have to do that first.
+- **History.** The dashboard builds chart, trades and reports from event logs, 50,000 blocks per request on
+  Arbitrum. HyperEVM endpoints are reported to allow 50 blocks per request, which needs an indexer.
+
+What would make the move worth it: contracts on the HyperEVM can read and write HyperCore, where
+Hyperliquid's own order books run. A PERMA vault could then trade there. That is not built and not tried.
+
+Not checked: any of this on the live testnet. The gas figures are from the local chain.
+
 ## Running it yourself
 
 - **Remix VM**: follow `contracts/perma/README.md`, then run `scripts/perma/demo.ts`.
