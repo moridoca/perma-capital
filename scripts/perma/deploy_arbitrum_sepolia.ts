@@ -41,9 +41,10 @@ const EXISTING = {
 const OUT_FILE = 'scripts/perma/arbitrum-sepolia-deployment.json'
 
 // Arbitrum ignores the tip and charges the base fee only (0.02 gwei on 21 Nov 2026).
-// The cap just has to stay above it.
+// The cap just has to stay above it. Keep it low: the wallet must hold gas limit x cap
+// for every deployment, and the large deployers have high gas limits.
 const PRIORITY_FEE_GWEI = '0'
-const MAX_FEE_GWEI = '1'
+const MAX_FEE_GWEI = '0.1'
 
 const E: any = ethers
 const v6 = !!E.BrowserProvider
