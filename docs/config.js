@@ -44,10 +44,11 @@ window.PERMA_NETWORKS = {
       'https://arbitrum-sepolia.gateway.tenderly.co'
     ],
     explorer: 'https://sepolia.arbiscan.io',
-    // Filled in after deploy_arbitrum_sepolia.ts has run. Empty = not deployed yet.
-    umbrella: '',
-    usdc: '',
-    deployBlock: 0,
+    // Deployed 22 Nov 2026 with deploy_arbitrum_sepolia.ts (same deployer and nonces as on
+    // Sepolia, so the core addresses match). Record: scripts/perma/arbitrum-sepolia-deployment.json
+    umbrella: '0x15690c82c8aabda3F5689157ebF637A4F5c8e672',
+    usdc: '0x232dA8232534064007557E29A9186240c567B64D',
+    deployBlock: 331513588,
     logChunk: 50000,
     batch: 10,
     pollMs: 2000,
@@ -55,7 +56,7 @@ window.PERMA_NETWORKS = {
     // Arbitrum ignores the tip and charges only the base fee (0.02 gwei on 21 Nov 2026).
     // The cap only has to stay above it; a lower cap means less gas has to sit in the trading key.
     fees: { priorityGwei: '0', maxGwei: '0.2' },
-    tradingAccounts: '',
+    tradingAccounts: '0x12acA0B765732b7db6484bf8844bBD21d394e3bF',
     tkGas: '0.002',
     // Lets MetaMask add the network if it does not know it yet.
     addChain: {

@@ -138,7 +138,11 @@ how long each transaction took.
    other chain.
 4. Enter the printed umbrella, mUSDC and deploy block under `arbitrum` in `docs/config.js`.
 
-Until step 4 the Arbitrum page says that nothing is deployed there yet.
+Deployed on 22 Nov 2026 (block 331,513,588). The deployer used the same nonces as on
+Sepolia, so umbrella, mUSDC and the three sub-funds have the same addresses on both
+networks; only the TradingAccountFactory differs (`0x12acA0B765732b7db6484bf8844bBD21d394e3bF`).
+All addresses: `scripts/perma/arbitrum-sepolia-deployment.json`. The whole deployment
+(8 transactions) cost about 0.00045 ETH.
 
 ## Running it yourself
 
