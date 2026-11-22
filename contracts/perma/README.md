@@ -14,7 +14,7 @@ Prototype for the Remix VM and testnets. mUSDC is play money.
 | UmbrellaFactory.sol | The umbrella. Launches sub-funds and lists them. One call, overview(i), returns addresses, NAV, market price and premium/discount. |
 | SubFund.sol | One sub-fund: primary sale, vault, NAV, fee, buyback, follow-on issuance, GP removal vote. |
 | FundToken.sol | The sub-fund's share token. Freely transferable ERC-20; only the sub-fund can mint. |
-| OrderBook.sol | Secondary market. The fund's liquidity as a ladder of 20 rungs in 1% steps around NAV, plus holders' limit orders. 0.07% taker fee, paid to the fund. |
+| OrderBook.sol | Secondary market. Below NAV the fund's cash on a ladder of 50 bid rungs in 0.2% steps, each reselling 0.1% higher; above NAV new issuance at NAV +0.2%; plus holders' limit orders. 0.07% taker fee, paid to the fund. |
 | GPVesting.sol | Holds the manager's fee tokens until they vest. |
 | Deployers.sol | Two helpers that keep every contract under the 24 KB size limit (EIP-170). |
 | MockUSDC.sol | Test stablecoin with a public faucet. |
@@ -28,14 +28,15 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 |---|---|---|
 | Primary sale price | $1.00, fixed | SubFund.buy |
 | Sale cap | 9,500,000 tokens | SALE_CAP |
-| Fund-owned liquidity | sold / 19 tokens plus the same amount of mUSDC, i.e. 5% of total supply; cannot be withdrawn | closeSale |
-| Ladder | ten ask rungs at NAV +1% to +10% with the tokens, ten bid rungs at NAV -1% to -10% with the cash, equal sizes; prices follow NAV | OrderBook.seed, ladder |
+| Fund-owned liquidity | $1 of sale cash for every 19 tokens sold (5.26% of the proceeds); cannot be withdrawn | closeSale |
+| Ladder | 50 bid rungs from NAV -0.2% to NAV -10% in 0.2% steps, equal cash; a rung offers what it bought 0.1% of NAV higher; prices follow NAV | OrderBook.seed, ladder |
+| Issuance above NAV | new tokens at NAV +0.2% once nothing cheaper is on offer; no size limit; payment goes to the vault | OrderBook.issuePrice, SubFund.issue |
 | Taker fee | 0.07% of the mUSDC traded, paid to the fund's vault; resting orders pay nothing | TAKER_FEE_BPS |
-| Total supply at launch | 10,000,000 if sold out | initialSupply |
-| Management fee | 2% of initial supply per year, paid in new tokens (200,000) | mintManagementFee |
-| Fee lifetime cap | 10 tranches (2,000,000 tokens), then never again | FEE_YEARS_CAP |
+| Total supply at launch | 9,500,000 if sold out | initialSupply |
+| Management fee | 2% of initial supply per year, paid in new tokens (190,000) | mintManagementFee |
+| Fee lifetime cap | 10 tranches (1,900,000 tokens), then never again | FEE_YEARS_CAP |
 | Fee lock-up | each tranche unlocks one year after minting | GPVesting |
-| Buyback trigger | market price at 10% below NAV, the bottom of the ladder | buyback |
+| Buyback trigger | market price at the bottom of the ladder, 9.9% below NAV | buyback |
 | Buyback size | at most 1% of vault cash per execution, one per week, anyone can trigger | buyback |
 | Follow-on issue price | the higher of NAV and market price | issuePrice |
 | GP removal | more than 50% of eligible supply votes yes; unvested fee tokens are burned | executeRemoveGP |
@@ -50,38 +51,42 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
   markInvestments revalues). This is the one trust assumption of the model.
 - Outstanding supply excludes the fund's own tokens on the ladder (treasury stock).
 
-Market price and NAV are two separate numbers. The ladder keeps them within
-10% of each other as long as it has stock on the side that is being taken;
-beyond that, only holders' orders trade. premiumBps() shows the gap. The
-buyback rule and the follow-on rule lean against it, from below and from above.
+Market price and NAV are two separate numbers, but the fund keeps them close:
+above NAV it issues new tokens at NAV +0.2%, so the market cannot run away
+upwards; below NAV its ladder bids down to NAV -10%. Beyond the ladder only
+holders' orders trade, and the buyback rule leans against the discount.
 
 ## The order book
 
-The fund is its own market maker. Its liquidity sits on 20 rungs:
+The fund is its own market maker.
 
-    bids   NAV -1%, -2%, ... -10%     one tenth of the cash on each
-    asks   NAV +1%, +2%, ... +10%     one tenth of the tokens on each
+    NAV +0.2%          new tokens, any size, money to the vault
+    NAV                (nothing: the fund never trades at NAV itself)
+    NAV -0.2% ... -10% 50 bids, one fiftieth of the cash on each
 
 - Rung prices are computed from navPerToken() at the moment of a trade. When
-  NAV changes, the whole ladder moves; nobody has to re-quote it.
-- A rung that sold tokens holds the cash and bids it at the same price; a rung
-  that bought tokens offers them at the same price. Inside the band the price
-  is therefore found by trading, and a round trip costs the fund nothing and
-  earns it the fee twice.
+  NAV changes, the whole ladder and the issue price move; nobody re-quotes.
+- A rung that bought tokens offers them again 0.1% of NAV above its bid. A
+  round trip therefore leaves the fund 0.1% plus the fee twice, and the profit
+  stays on the rung as more cash to bid with.
+- Buyers get the cheapest offer first: holders' sell orders and the rungs'
+  resale offers, all below NAV +0.2%, and only then new tokens. Issuing above
+  NAV raises NAV per token; it never dilutes holders.
 - Holders place limit orders at any fixed price (limitBuy, limitSell, cancel).
   A limit order first takes whatever the book offers at its price or better,
-  the rest waits in the book. The smallest resting order is 1 token.
+  the rest waits in the book. The smallest resting order is 1 token. A sell
+  order above the issue price will not be reached while the fund issues below it.
 - Market orders are buy(usdcIn, minTokenOut, ids) and sell(tokenIn,
   minUSDCOut, ids). ids are the resting orders to trade against, best price
-  first; the book takes the better price at every step, order or rung, and a
-  holder's order goes first at the same price. quoteBuy and quoteSell return
-  what a market order would do.
-- marketPrice() is the middle between the ladder's best bid and best ask.
-  Holders' orders do not count, so posting an order cannot move it.
+  first; the book takes the better price at every step, and a holder's order
+  goes first at the same price. quoteBuy and quoteSell return what a market
+  order would do.
+- marketPrice() is the middle between the ladder's best bid and the fund's
+  best offer. Holders' orders do not count, so posting an order cannot move it.
 
-Compared with the constant-product pool this replaces: 5% of supply in a
-pool moved the price by about 19% for an order of 1% of the fund. On the
-ladder the same order moves it by about 1.5%.
+Compared with the constant-product pool this replaces: an order of 1% of the
+fund moved the pool price by about 19%. Now a buy of any size costs NAV +0.2%,
+and a sale of 1% of the fund goes through about ten rungs, 2% below NAV.
 
 ## Run the demo
 
@@ -110,10 +115,14 @@ the order book before trading.
 ## Known limits
 
 - GP-reported investment value is not verified on-chain.
-- The ladder is quoted around the GP-reported NAV. A valuation that is too
-  high lets holders sell to the fund's bids at too high a price, one that is
-  too low lets buyers take its tokens too cheaply. What is exposed is the
-  liquidity in the book, 5% of the fund, not the vault.
+- The ladder and the issue price follow the GP-reported NAV. A valuation that
+  is too high lets holders sell to the fund's bids at too high a price; what is
+  exposed there is the cash in the book. A valuation that is too low lets
+  buyers have new tokens too cheaply, without a size limit: that dilutes every
+  holder, and the GP is the one who sets the number. A cap on issuance per
+  period, or issuance only when the GP opens it, would bound this.
+- Issuance has no size limit, so the fund takes in cash whenever buyers pay
+  NAV +0.2%, whether or not the GP has a use for it.
 - Whoever sees a revaluation first can trade against orders that are still
   priced for the old NAV. For the ladder this is harmless (it moves in the same
   transaction); for holders' resting orders it is the usual risk of a limit

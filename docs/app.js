@@ -73,7 +73,8 @@
     ],
     book: [
       'function TAKER_FEE_BPS() view returns (uint256)',
-      'function ladder() view returns (uint256 nav, uint256[] prices, uint256[] tokens, uint256[] cash)',
+      'function ladder() view returns (uint256 nav, uint256[] bids, uint256[] asks, uint256[] tokens, uint256[] cash)',
+      'function issuePrice() view returns (uint256)',
       'function openOrders() view returns (uint256[] ids, address[] makers, bool[] isBuy, uint256[] prices, uint256[] tokens)',
       'function quoteBuy(uint256 usdcIn, uint256[] ids) view returns (uint256 tokenOut, uint256 usdcSpent, uint256 priceAtEnd)',
       'function quoteSell(uint256 tokenIn, uint256[] ids) view returns (uint256 usdcOut, uint256 tokenSold, uint256 priceAtEnd)',
@@ -250,7 +251,7 @@
       ...FUND_KEYS.map((k) => fund[k]()),
       fund.ownedLiquidity(), token.totalSupply(), token.symbol(),
       book.ladder().catch(oldDeployment), book.openOrders(), vesting.unvested(), vesting.claimable(), vesting.trancheCount(),
-      state.fee[f.book] ? Promise.resolve(state.fee[f.book]) : book.TAKER_FEE_BPS()
+      state.fee[f.book] ? Promise.resolve(state.fee[f.book]) : book.TAKER_FEE_BPS(), book.issuePrice()
     ])
     const d = {}
     FUND_KEYS.forEach((k, i) => { d[k] = res[i] })
@@ -258,7 +259,7 @@
     d.polTokens = res[n][0]; d.polCash = res[n][1]
     d.totalSupply = res[n + 1]; d.symbol = res[n + 2]
     const l = res[n + 3], o = res[n + 4]
-    d.lad = { prices: [...l[1]], tokens: [...l[2]], cash: [...l[3]] }
+    d.lad = { prices: [...l[1]], asks: [...l[2]], tokens: [...l[3]], cash: [...l[4]], issue: res[n + 9] }
     d.orders = [...o[0]].map((id, k) => ({ id, maker: o[1][k], isBuy: o[2][k], price: o[3][k], tokens: o[4][k] }))
     d.unvested = res[n + 5]; d.claimable = res[n + 6]; d.tranches = res[n + 7]
     BOOK_FEE_BPS = state.fee[f.book] = res[n + 8]
@@ -520,9 +521,9 @@
       PUT('chartBox').h = '<div class="salebox"><div class="salebig">' + amt(d.sold) + '<small> of 9,500,000 ' + esc(d.symbol) + ' sold · ' + sp.toFixed(1) + '%</small></div>' +
         '<div class="meter"><i class="infoc" style="width:' + Math.min(100, sp) + '%"></i></div><ol class="salesteps">' +
         '<li><b>Primary sale.</b> Investors buy new tokens from the fund at a fixed $1.00. The money goes into the vault.</li>' +
-        '<li><b>Close.</b> The GP closes the sale, or it sells out. For every 19 tokens sold, 1 token and $1 become fund-owned liquidity' +
-        (d.sold > 0n ? ': at today\'s level ' + amt(pol) + ' ' + esc(d.symbol) + ' + ' + amt(pol) + ' mUSDC.' : '.') + '</li>' +
-        '<li><b>Market.</b> The order book opens around $1.00: the fund quotes ten 1% steps on each side of NAV, holders add limit orders. Candles from on-chain trades and the NAV line appear here.</li></ol></div>'
+        '<li><b>Close.</b> The GP closes the sale, or it sells out. For every 19 tokens sold, $1 becomes fund-owned liquidity' +
+        (d.sold > 0n ? ': at today\'s level ' + amt(pol) + ' mUSDC of bids below NAV.' : '.') + '</li>' +
+        '<li><b>Market.</b> The order book opens around $1.00: the fund bids in fifty 0.2% steps below NAV and issues new tokens just above it; holders add limit orders. Candles from on-chain trades and the NAV line appear here.</li></ol></div>'
       return
     }
     if (!cd) { PUT('chartBox').h = '<p class="note">Loading price history…</p>'; return }
@@ -608,13 +609,15 @@
     const levels = (bid) => {
       const by = new Map()
       const add = (price, q, own) => { const k = price.toString(), r = by.get(k) || { price, q: 0n, fund: false, own: false }; r.q += q; if (own === null) r.fund = true; else if (own) r.own = true; by.set(k, r) }
-      d.lad.prices.forEach((price, i) => { const q = bid ? bidSize(d.lad.cash[i], price) : d.lad.tokens[i]; if (q > 0n && price > 0n) add(price, q, null) })
-      for (const o of d.orders) if (o.isBuy === bid && o.tokens > 0n) add(o.price, o.tokens, o.maker.toLowerCase() === mine)
+      d.lad.prices.forEach((bp, i) => { const price = bid ? bp : d.lad.asks[i], q = bid ? bidSize(d.lad.cash[i], bp) : d.lad.tokens[i]; if (q > 0n && price > 0n) add(price, q, null) })
+      for (const o of d.orders) if (o.isBuy === bid && o.tokens > 0n && (bid || o.price <= d.lad.issue)) add(o.price, o.tokens, o.maker.toLowerCase() === mine)
       const rows = [...by.values()].sort((x, y) => (x.price === y.price ? 0 : (x.price < y.price) === bid ? 1 : -1)).slice(0, 8)
       let cum = 0
       return rows.map((r) => { cum += num(r.q) * num(r.price); return { px: num(r.price), q: num(r.q), cum, fund: r.fund, own: r.own } })
     }
     const asks = levels(false), bids = levels(true)
+    // above every offer: the fund issues new tokens, without a size limit
+    const issueRow = '<div class="br ask"><span class="p">' + num(d.lad.issue).toFixed(4) + ' <em>issue</em></span><span>any size</span><span>–</span></div>'
     const mx = Math.max(asks.length ? asks[asks.length - 1].cum : 0, bids.length ? bids[bids.length - 1].cum : 0, 1)
     const row = (r, side) => '<div class="br ' + side + '"><i style="width:' + ((r.cum / mx) * 100).toFixed(1) + '%"></i><span class="p">' + r.px.toFixed(4) + (r.fund ? '' : ' <em>' + (r.own ? 'you' : 'holder') + '</em>') +
       (r.fund && r.own ? ' <em>+you</em>' : '') + '</span><span>' + cmp(r.q) + '</span><span>' + cmp(r.cum) + '</span></div>'
@@ -625,11 +628,11 @@
     }
     const P0 = num(d.marketPrice)
     body.h = '<div class="bh"><span>Price</span><span>Size (' + esc(d.symbol) + ')</span><span>Total (mUSDC)</span></div><div class="basks">' +
-      (asks.length ? asks.slice().reverse().map((r) => row(r, 'ask')).join('') : '<div class="bempty">No offers: the ladder is sold out</div>') + '</div>' +
+      issueRow + asks.slice().reverse().map((r) => row(r, 'ask')).join('') + '</div>' +
       '<div class="bspread"><span>Market</span><span>' + P0.toFixed(4) + '</span><span>' + (d.marketPrice <= d.buybackTriggerPrice ? 'buyback triggered' : '') +
       '</span><span class="bnav">NAV ' + nav.toFixed(4) + '</span></div>' +
-      '<div class="bbids">' + (bidHtml || '<div class="bempty">No bids: the ladder\'s cash is used up</div>') + '</div><p class="bfoot">Unmarked rows are the fund\'s own ladder: its liquidity in ten 1% steps on each side of NAV, moving with NAV and not withdrawable. ' +
-      'Marked rows are holders\' limit orders at fixed prices. Taking costs ' + feeText() + ', resting orders pay nothing.</p>'
+      '<div class="bbids">' + (bidHtml || '<div class="bempty">No bids: the ladder\'s cash is used up</div>') + '</div><p class="bfoot">Unmarked rows are the fund\'s own ladder: its cash in fifty 0.2% steps below NAV, moving with NAV and not withdrawable. What a rung bought it offers again 0.1% higher. ' +
+      'Above NAV the fund issues new tokens at NAV +0.2%; the money goes into the vault. Marked rows are holders\' limit orders. Taking costs ' + feeText() + ', resting orders pay nothing.</p>'
   }
 
   function renderBottom() {
@@ -680,7 +683,7 @@
   function renderIpo() {
     const d = state.detail, m = state.me
     const p = Number((d.sold * 10000n) / SALE_CAP) / 100
-    PUT('ipoStatus').h = '<p class="lead">New tokens from the fund at a fixed $1.00. This is the only issue: no capital calls later. When the sale closes, 5% of supply plus the same cash become fund-owned liquidity and the market opens at $1.00.</p>' +
+    PUT('ipoStatus').h = '<p class="lead">New tokens from the fund at a fixed $1.00. No capital calls later. When the sale closes, $1 for every 19 tokens sold becomes fund-owned liquidity: bids below NAV in the order book. The market opens at $1.00; above NAV the fund issues new tokens.</p>' +
       '<div class="qrow"><span>Price</span><span>$1.0000</span></div><div class="qrow"><span>Sold</span><span>' + amt(d.sold) + ' of 9,500,000 (' + p.toFixed(1) + '%)</span></div><div class="meter"><i class="infoc" style="width:' + Math.min(100, p) + '%"></i></div>'
     const acct2 = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div>'
       : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to buy' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
@@ -719,8 +722,8 @@
   // One entry per rule: [state of the lamp, status html]. 'off' = needs attention or can be acted on now.
   const RULES = [
     { k: 'sale', t: 'Primary sale', p: 'Fixed $1.00 per token, hard cap of 9,500,000 tokens.', act: 'close' },
-    { k: 'pol', t: 'Fund-owned liquidity', p: '5% of supply plus the same cash goes into the order book, quoted in ten 1% steps on each side of NAV. The fund has no function to withdraw it.' },
-    { k: 'buyback', t: 'Buyback-and-burn', p: 'Anyone can trigger it once the market has fallen to 10% below NAV, the bottom of the fund\'s ladder. At most 1% of vault cash per execution.', act: 'buyback' },
+    { k: 'pol', t: 'Fund-owned liquidity', p: 'Sale cash worth 1/19 of the tokens sold goes into the order book as bids in fifty 0.2% steps below NAV; a rung resells what it bought 0.1% higher. The fund has no function to withdraw it. Above NAV it issues new tokens at NAV +0.2%.' },
+    { k: 'buyback', t: 'Buyback-and-burn', p: 'Anyone can trigger it once the market has fallen to the bottom of the fund\'s ladder, 9.9% below NAV. At most 1% of vault cash per execution.', act: 'buyback' },
     { k: 'followon', t: 'Follow-on issuance', p: 'New tokens only at the higher of NAV and market price, so new money never dilutes holders.' },
     { k: 'fee', t: 'Management fee', p: '2% of initial supply per year, paid in new tokens. Ten tranches at most, each locked for one year.', act: 'fee' },
     { k: 'gov', t: 'GP removal', p: 'More than 50% of eligible supply replaces the GP. Unvested fee tokens are burned.' },
@@ -1266,15 +1269,18 @@
   // The same walk and the same rounding as OrderBook._match, so a preview shows what the contract will do.
   let BOOK_FEE_BPS = 7n // replaced by the contract's TAKER_FEE_BPS when a fund is loaded
   const bookFee = (cash) => (cash * BOOK_FEE_BPS + 9999n) / 10000n
+  const BOOK_NO_CAP = (1n << 128n) - 1n
   const bidSize = (cash, price) => { if (price === 0n) return 0n; const s = (cash * U6) / price; return (s * price) / U6 === 0n ? 0n : s }
-  // lad: { prices, tokens, cash } of the 20 rungs. orders: open orders of the other side, best price first.
+  // lad: per rung below NAV its bid price (prices), its ask price (asks), tokens and cash; issue: the price of new tokens.
+  // orders: open orders of the other side, best price first.
   function bookMatch(buying, maxTokens, maxCash, limit, lad, orders) {
     const n = lad.prices.length, tok = lad.tokens.slice(), cash = lad.cash.slice()
-    const m = { tokens: 0n, cash: 0n, last: 0n, fills: [] }
+    const m = { tokens: 0n, cash: 0n, last: 0n, issued: 0n, fills: [] }
     let i = buying ? 0 : n, j = 0
     while (m.tokens < maxTokens) {
       let rp = 0n, ra = 0n
-      if (buying) { for (; i < n; i++) if (tok[i] > 0n && lad.prices[i] > 0n) { rp = lad.prices[i]; ra = tok[i]; break } }
+      if (buying) { for (; i < n; i++) if (tok[i] > 0n && lad.asks[i] > 0n) { rp = lad.asks[i]; ra = tok[i]; break }
+        if (ra === 0n && lad.issue > 0n) { rp = lad.issue; ra = BOOK_NO_CAP } } // nothing left on the ladder: new issuance
       else { for (; i > 0; i--) { const a = bidSize(cash[i - 1], lad.prices[i - 1]); if (a > 0n) { rp = lad.prices[i - 1]; ra = a; break } } }
       let op = 0n, oa = 0n
       for (; j < orders.length; j++) { const o = orders[j]; if (o.tokens > 0n && (buying || (o.tokens * o.price) / U6 > 0n)) { op = o.price; oa = o.tokens; break } }
@@ -1288,14 +1294,14 @@
       else { c = (q * p) / U6; if (c === 0n) break }
       m.tokens += q; m.cash += c; m.last = p
       if (useOrder) { m.fills.push({ id: orders[j].id, q }); j++ }
+      else if (buying && i === n) m.issued += q
       else if (buying) { tok[i] -= q; cash[i] += c }
       else { cash[i - 1] -= c; tok[i - 1] += q }
     }
     m.fee = bookFee(m.cash)
-    m.ladder = { prices: lad.prices, tokens: tok, cash }
+    m.ladder = { prices: lad.prices, asks: lad.asks, tokens: tok, cash, issue: lad.issue }
     return m
   }
-  const BOOK_NO_CAP = (1n << 128n) - 1n
   const bookBuy = (usdcIn, lad, orders) => bookMatch(true, BOOK_NO_CAP, (usdcIn * 10000n) / (10000n + BOOK_FEE_BPS), (1n << 256n) - 1n, lad, orders)
   const bookSell = (tokenIn, lad, orders) => bookMatch(false, tokenIn, BOOK_NO_CAP, 0n, lad, orders)
   // Open orders a taker would name: the other side, best price first, at most `max`.
@@ -1303,10 +1309,10 @@
     .sort((a, b) => (a.price === b.price ? (a.id < b.id ? -1 : 1) : (buying ? (a.price < b.price ? -1 : 1) : (a.price > b.price ? -1 : 1)))).slice(0, max || 40)
   // The ladder's own price, as OrderBook.spotPrice() computes it.
   function bookSpot(lad) {
-    let ask = 0n, bid = 0n
-    for (let i = 0; i < lad.prices.length; i++) if (lad.tokens[i] > 0n) { ask = lad.prices[i]; break }
+    let ask = lad.issue, bid = 0n
+    for (let i = 0; i < lad.asks.length; i++) if (lad.tokens[i] > 0n) { ask = lad.asks[i]; break }
     for (let i = lad.prices.length; i > 0; i--) if (bidSize(lad.cash[i - 1], lad.prices[i - 1]) > 0n) { bid = lad.prices[i - 1]; break }
-    return ask === 0n ? bid : bid === 0n ? ask : (ask + bid) / 2n
+    return bid === 0n ? ask : (ask + bid) / 2n
   }
   // <<< book maths
 
@@ -1334,11 +1340,11 @@
       why: marketOpen,
       quote: (d, m, v) => {
         const sim = bookBuy(v.a, d.lad, hintsFor(d, true))
-        if (sim.tokens === 0n) return [['Nothing on offer', 'the book has no sell side right now']]
+        if (sim.tokens === 0n) return null
         const paid = sim.cash + sim.fee
         return [['You pay', amt(paid) + ' mUSDC'], ['You receive about', amt(sim.tokens) + ' ' + d.symbol], ['Average price', usd((paid * U6) / sim.tokens)], ['Last fill at', usd(sim.last)],
           ['Last fill vs NAV', vsNav(sim.last, d.navPerToken)], ['Taker fee (' + feeText() + ')', amt(sim.fee) + ' mUSDC'], ['Minimum received', amt((sim.tokens * 99n) / 100n) + ' ' + d.symbol]]
-          .concat(v.a - paid > U6 ? [['Not filled', amt(v.a - paid) + ' mUSDC: the book offers no more']] : [])
+          .concat(sim.issued > 0n ? [['Newly issued', amt(sim.issued) + ' ' + d.symbol + ' at ' + usd(d.lad.issue)]] : [])
       },
       steps: async (c, v) => {
         const ids = hintsFor(c.d, true).map((o) => o.id), q = await c.book.quoteBuy(v.a, ids)
@@ -1365,7 +1371,7 @@
         const sim = bookMatch(true, v.a, BOOK_NO_CAP, v.p, d.lad, hintsFor(d, true, v.p))
         const rest = v.a - sim.tokens >= U6 ? v.a - sim.tokens : 0n
         return [['Limit price', usd(v.p)], ['Vs NAV', vsNav(v.p, d.navPerToken)],
-          ['Fills at once', sim.tokens > 0n ? amt(sim.tokens) + ' ' + d.symbol + ' at avg ' + usd((sim.cash * U6) / sim.tokens) : 'nothing: no offer at or below your price'],
+          ['Fills at once', sim.tokens > 0n ? amt(sim.tokens) + ' ' + d.symbol + ' at avg ' + usd((sim.cash * U6) / sim.tokens) : 'nothing: below the cheapest offer'],
           ['Rests in the book', rest > 0n ? amt(rest) + ' ' + d.symbol + ' at ' + usd(v.p) : 'nothing'],
           ['mUSDC needed', amt(sim.cash + (sim.tokens > 0n ? sim.fee : 0n) + ceilMul(rest, v.p))],
           ['Taker fee (' + feeText() + ')', sim.tokens > 0n ? amt(sim.fee) + ' mUSDC' : 'none while resting']]
@@ -1409,7 +1415,7 @@
     { id: 'buyback', inline: true, title: 'Trigger the buyback-and-burn', btn: 'Trigger buyback', optional: true,
       fields: [F.usdc('a', 'empty = maximum')],
       show: (d) => d.saleClosed,
-      why: (d) => !d.saleClosed ? 'Opens with the market.' : d.marketPrice > d.buybackTriggerPrice ? 'The market has not fallen to 10% below NAV.' :
+      why: (d) => !d.saleClosed ? 'Opens with the market.' : d.marketPrice > d.buybackTriggerPrice ? 'The market has not fallen to the bottom of the ladder.' :
         Number(d.lastBuyback) + Math.floor(state.year / 52) > now() ? 'Cooldown: ' + dur(Number(d.lastBuyback) + Math.floor(state.year / 52) - now()) + '.' :
           d.maxBuyback === 0n ? 'The vault holds no cash.' : '',
       pre: (d, m, v) => v.a === null && d.saleClosed ? 'Empty sends ' + amt(d.maxBuyback) + ' mUSDC, the 1% limit. It buys the cheapest offers: holders\' sell orders below the ladder first.' : '',

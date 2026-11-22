@@ -18,12 +18,15 @@ interface IComponentDeployer {
 ///
 ///         What the code enforces (no manager discretion):
 ///           - primary sale at a fixed $1.00, hard-capped
-///           - 5% of supply paired with sale cash as permanent, fund-owned liquidity,
-///             quoted in the order book in equal steps of 1% around NAV
+///           - sale cash worth 1/19 of the tokens sold as permanent, fund-owned
+///             liquidity: bids in the order book in equal steps of 0.2% below NAV,
+///             each reselling what it bought 0.1% higher
+///           - above NAV the fund issues new tokens at NAV +0.2%: the money
+///             goes into the vault and never dilutes holders
 ///           - management fee paid in tokens: 2% of initial supply per year,
 ///             10-year lifetime cap, each tranche locked for one year
 ///           - buyback-and-burn that anyone can trigger when the market
-///             has fallen to 10% below NAV, the bottom of the fund's ladder
+///             has fallen to the bottom of the fund's ladder, 9.9% below NAV
 ///           - follow-on issuance only at or above NAV, so new money never dilutes holders
 ///           - token holders can replace the GP; unvested fee tokens are burned
 ///
@@ -39,14 +42,13 @@ contract SubFund {
     // --- primary sale ---
     uint256 public constant IPO_PRICE = 1e6;          // $1.00 per token
     uint256 public constant SALE_CAP = 9_500_000e6;   // tokens sold to investors
-    uint256 public constant POL_DIVISOR = 19;         // liquidity seed = sold / 19  (= 5% of total supply)
+    uint256 public constant POL_DIVISOR = 19;         // liquidity seed = sale cash for sold / 19 tokens
 
     // --- management fee (in tokens, no NAV input needed) ---
     uint256 public constant FEE_BPS_PER_YEAR = 200;   // 2% of initial supply per year
     uint256 public constant FEE_YEARS_CAP = 10;       // fee minting stops for good after 10 tranches
 
     // --- discount control ---
-    uint256 public constant BUYBACK_TRIGGER_BPS = 1000; // market price 10% below NAV: the ladder's lowest rung
     uint256 public constant BUYBACK_MAX_BPS = 100;      // at most 1% of vault cash per execution
 
     // --- governance ---
@@ -95,6 +97,7 @@ contract SubFund {
 
     event Purchased(address indexed investor, uint256 tokens);
     event SaleClosed(uint256 sold, uint256 liquidityTokens, uint256 liquidityUSDC);
+    event Issued(uint256 tokens);
     event CapitalDeployed(address indexed to, uint256 amount, string memo);
     event ProceedsReturned(address indexed from, uint256 amount, uint256 newInvestedValue);
     event InvestmentsMarked(uint256 oldValue, uint256 newValue, string memo);
@@ -160,19 +163,16 @@ contract SubFund {
         require(msg.sender == gp || sold == SALE_CAP, "Fund: only GP before sell-out");
         saleClosed = true;
 
-        // Permanent fund-owned liquidity: equal token and cash value at $1.00,
-        // placed on the book's ladder around NAV. The fund has no function
-        // to withdraw it again.
-        uint256 liqTokens = sold / POL_DIVISOR;
-        uint256 liqUSDC = (liqTokens * IPO_PRICE) / ONE;
-        token.mint(address(this), liqTokens);
-        token.approve(address(book), liqTokens);
+        // Permanent fund-owned liquidity: cash on the book's bid ladder below
+        // NAV. The fund has no function to withdraw it again. No tokens are
+        // set aside: above NAV the book issues new ones.
+        uint256 liqUSDC = ((sold / POL_DIVISOR) * IPO_PRICE) / ONE;
         usdc.approve(address(book), liqUSDC);
-        book.seed(liqTokens, liqUSDC);
+        book.seed(liqUSDC);
 
-        initialSupply = sold + liqTokens;
+        initialSupply = sold;
         lastFeeMint = block.timestamp;
-        emit SaleClosed(sold, liqTokens, liqUSDC);
+        emit SaleClosed(sold, 0, liqUSDC);
         _emitNAV();
     }
 
@@ -278,8 +278,9 @@ contract SubFund {
     // 4. Discount control: rule-based buyback-and-burn
     // ==================================================================
 
+    /// @notice The bottom of the ladder: the lowest price it ever offers at.
     function buybackTriggerPrice() public view returns (uint256) {
-        return (navPerToken() * (10_000 - BUYBACK_TRIGGER_BPS)) / 10_000;
+        return book.floorPrice();
     }
 
     function maxBuyback() public view returns (uint256) {
@@ -287,8 +288,8 @@ contract SubFund {
     }
 
     /// @notice Anyone can make the fund buy its own tokens in the book and
-    ///         burn them once the market has fallen to 10% below NAV. That is
-    ///         the bottom of the ladder: its bids are used up. Limited to 1%
+    ///         burn them once the market has fallen to the bottom of the ladder,
+    ///         9.9% below NAV: its bids are used up. Limited to 1%
     ///         of vault cash per execution and one execution per "week".
     ///         Buying below NAV never lowers NAV per token.
     ///         Bought from holders' sell orders, this is a buyback at a
@@ -316,6 +317,15 @@ contract SubFund {
     // ==================================================================
     // 5. Follow-on issuance: only at or above NAV
     // ==================================================================
+
+    /// @notice New tokens for a buyer in the order book, at the book's issue
+    ///         price above NAV. Only the book can call this; it has already
+    ///         sent the payment to this vault.
+    function issue(address to, uint256 tokenAmount) external {
+        require(msg.sender == address(book), "Fund: only the book");
+        token.mint(to, tokenAmount);
+        emit Issued(tokenAmount);
+    }
 
     /// @notice GP offers additional tokens. The price is not his choice.
     function openFollowOn(uint256 tokenAmount) external onlyGP {
