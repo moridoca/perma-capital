@@ -12,7 +12,7 @@ import { ethers } from 'ethers'
 
 const UMBRELLA: { [chainId: number]: string } = {
   11155111: '0x15690c82c8aabda3F5689157ebF637A4F5c8e672', // Sepolia
-  421614: '' // Arbitrum Sepolia: filled in by deploy_arbitrum_sepolia.ts, which also deploys the factory
+  421614: '0x6a45Fd87609163Fe1BB19a5393ABf974D97ddC00' // Arbitrum Sepolia, deployment of 22 Nov 2026 (deploy_arbitrum_sepolia.ts deploys a factory itself; this replaces it)
 }
 const FEES: { [chainId: number]: [string, string] } = { 11155111: ['0.05', '0.1'], 421614: ['0', '0.2'] }
 

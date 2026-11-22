@@ -1,0 +1,6 @@
+{
+  "comment": "network: arbitrum-sepolia or local (start test/serve.js first). secret_key: a TEST wallet's private key, never a wallet that holds real money. Copy to config.json, which git ignores.",
+  "network": "arbitrum-sepolia",
+  "secret_key": "",
+  "vault_address": ""
+}

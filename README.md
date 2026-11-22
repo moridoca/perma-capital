@@ -18,6 +18,7 @@ separate sub-funds that are issued once and never wound up. University prototype
 | `scripts/perma/sepolia-deployment.json` | All addresses of the live deployment |
 | `scripts/perma/deploy_vaults.ts` | Adds the vault factory to an existing order-book deployment |
 | `test/` | Contract tests on a local chain (`npm test`) |
+| `sdk/python/` | Python SDK after the Hyperliquid Python SDK: `Info`, `Exchange`, vaults, agent keys, batches and pipelining for fast trading |
 | `docs/` | The dashboard: one static page, no backend, no build step (served by GitHub Pages) |
 
 ## Live deployment (Arbitrum Sepolia, chain id 421614)

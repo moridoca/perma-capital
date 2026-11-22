@@ -244,6 +244,27 @@ contract TradingAccount {
     }
 
     // ------------------------------------------------------------------
+    // Batches: several orders or cancels in one transaction
+    // ------------------------------------------------------------------
+
+    /// @notice Runs several calls to this account in one transaction, for example
+    ///         cancel-and-replace or a set of limit orders. Each call is checked
+    ///         exactly as if it were sent alone (same caller, same session limits);
+    ///         if one fails, the whole batch is undone.
+    function batch(bytes[] calldata calls) external returns (bytes[] memory results) {
+        results = new bytes[](calls.length);
+        for (uint256 i = 0; i < calls.length; i++) {
+            (bool ok, bytes memory out) = address(this).delegatecall(calls[i]);
+            if (!ok) {
+                assembly {
+                    revert(add(out, 32), mload(out))
+                }
+            }
+            results[i] = out;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Withdrawal: always to the owner
     // ------------------------------------------------------------------
 

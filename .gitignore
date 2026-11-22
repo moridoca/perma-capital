@@ -2,3 +2,6 @@ node_modules/
 .DS_Store
 test/artifacts.json
 test/package-lock.json
+chain.json
+sdk/python/examples/config.json
+__pycache__/

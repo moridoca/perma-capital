@@ -17,7 +17,7 @@ Prototype for the Remix VM and testnets. mUSDC is play money.
 | OrderBook.sol | Secondary market. Below NAV the fund's cash on a ladder of 250 bid rungs in 0.2% steps down to NAV -50%, each reselling 0.1% higher; above NAV new issuance at NAV +0.2%; plus holders' limit orders. 0.07% taker fee, paid to the fund. |
 | GPVesting.sol | Holds the manager's fee tokens until they vest. |
 | Vault.sol | Leader-run vaults, as on Hyperliquid: anyone opens one, trades it in the order books, others deposit. Separate from the funds' ladders. With VaultFactory. |
-| TradingAccount.sol | Trading account with session keys (fast trading without wallet prompts). With TradingAccountFactory. |
+| TradingAccount.sol | Trading account with session keys (fast trading without wallet prompts) and batch(): several orders or cancels in one transaction. With TradingAccountFactory. |
 | Deployers.sol | Two helpers that keep every contract under the 24 KB size limit (EIP-170). |
 | MockUSDC.sol | Test stablecoin with a public faucet. |
 | ERC20.sol | Minimal ERC-20 base, 6 decimals. No external imports. |
