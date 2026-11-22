@@ -22,18 +22,18 @@ separate sub-funds that are issued once and never wound up. University prototype
 
 ## Live deployment (Arbitrum Sepolia, chain id 421614)
 
-The current contracts (order book with NAV ladder, vaults), deployed 22 Nov 2026. This is
+The current contracts (order book with NAV ladder, surplus pot with buyback and dividend, vaults), deployed 22 Nov 2026. This is
 the network the dashboard opens with.
 
 | Contract | Address |
 |---|---|
-| UmbrellaFactory | `0xc110e67ee8e3208c17838CAD1942fA1f6A3EDF33` |
-| MockUSDC | `0xc442a797F44733F986B29aaE9Befb116CFd4aA44` |
-| TradingAccountFactory (fast trading) | `0x18C32CBE6C0eB77241Acd515a424Ac1A25d27eA2` |
-| VaultFactory | `0xe7D06EBF104B2994d59d6A02e3E446fD6F09726C` |
-| Perma Buyout (pBUY) | `0x4982A07065b1DEB59eB8b2B8Bc5cA72d7323a465` |
-| Perma Growth (pGRO) | `0xD31a163a618192b3A79962a5d380f6E7A331C414` |
-| Perma Agriculture (pAGR) | `0x89a8845642099c232EeFf9C07Bb390341A45aFeC` |
+| UmbrellaFactory | `0x6a45Fd87609163Fe1BB19a5393ABf974D97ddC00` |
+| MockUSDC | `0x9944f1A0bd3C616eB09C694A90b4930384A6479A` |
+| TradingAccountFactory (fast trading) | `0xE6e2Eb4b65f48d7aB473fe70e5f07eB98Af54d37` |
+| VaultFactory | `0x4A171285495bB9AE8b9f3E004b202205647a1a73` |
+| Perma Buyout (pBUY) | `0x0E3CEd8EE6C925F9A9c2B60f6710A22b1D75A816` |
+| Perma Growth (pGRO) | `0x1a742ac2c5416A6d01A9D1C5b6A039bAC7EC1192` |
+| Perma Agriculture (pAGR) | `0xF1C0EB10E6841F24575C05c6cDB5E8CccE765a37` |
 
 All addresses: `scripts/perma/arbitrum-sepolia-deployment.json`.
 
@@ -174,7 +174,7 @@ how long each transaction took.
    other chain.
 4. Enter the printed umbrella, mUSDC and deploy block under `arbitrum` in `docs/config.js`.
 
-Redeployed on 22 Nov 2026 with the order book and the vaults (block 331,730,235).
+Redeployed on 22 Nov 2026 with the order book, the surplus pot and the vaults (block 331,747,291).
 All addresses: `scripts/perma/arbitrum-sepolia-deployment.json`. The whole deployment
 (9 transactions) cost about 0.0008 ETH.
 

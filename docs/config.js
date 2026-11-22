@@ -48,9 +48,9 @@ window.PERMA_NETWORKS = {
     explorer: 'https://sepolia.arbiscan.io',
     // Order-book contracts with vaults, deployed 22 Nov 2026 with deploy_arbitrum_sepolia.ts.
     // Record: scripts/perma/arbitrum-sepolia-deployment.json
-    umbrella: '0xc110e67ee8e3208c17838CAD1942fA1f6A3EDF33',
-    usdc: '0xc442a797F44733F986B29aaE9Befb116CFd4aA44',
-    deployBlock: 331730235,
+    umbrella: '0x6a45Fd87609163Fe1BB19a5393ABf974D97ddC00',
+    usdc: '0x9944f1A0bd3C616eB09C694A90b4930384A6479A',
+    deployBlock: 331747291,
     logChunk: 50000,
     batch: 10,
     pollMs: 2000,
@@ -58,9 +58,9 @@ window.PERMA_NETWORKS = {
     // Arbitrum ignores the tip and charges only the base fee (0.02 gwei on 21 Nov 2026).
     // The cap only has to stay above it; a lower cap means less gas has to sit in the trading key.
     fees: { priorityGwei: '0', maxGwei: '0.2' },
-    tradingAccounts: '0x18C32CBE6C0eB77241Acd515a424Ac1A25d27eA2',
+    tradingAccounts: '0xE6e2Eb4b65f48d7aB473fe70e5f07eB98Af54d37',
     // VaultFactory; deposits lock for 120 seconds here.
-    vaults: '0xe7D06EBF104B2994d59d6A02e3E446fD6F09726C',
+    vaults: '0x4A171285495bB9AE8b9f3E004b202205647a1a73',
     tkGas: '0.002',
     // Lets MetaMask add the network if it does not know it yet.
     addChain: {
