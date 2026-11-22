@@ -95,13 +95,13 @@ The numbers are from a run of exactly these steps on a local chain.
 |---|---|---|
 | 1 | Portfolio: get test mUSDC, 2,000,000 | Wallet funded |
 | 2 | Trade: primary sale, 1,000,000 | 1,000,000 pBUY at $1.00 |
-| 3 | Trade: close the sale, open the market (GP) | Market opens at $1.00; 52,632 mUSDC become fund-owned liquidity: 50 bids from NAV −0.2% down to NAV −10% |
+| 3 | Trade: close the sale, open the market (GP) | 52,632 mUSDC become fund-owned liquidity: 50 bids from NAV −0.2% down to NAV −10%. Nothing is on offer yet, so the market price is the top bid, $0.9980 |
 | 4 | Funds, Manager: deploy capital, 600,000 | NAV stays $1.00; vault cash 347,368 |
-| 5 | Trade: buy for 5,000 mUSDC | 4,986.53 new pBUY, issued by the fund at NAV +0.2% ($1.0020) plus the 0.07% fee; the money goes into the vault. Market stays $1.0000 |
+| 5 | Trade: buy for 5,000 mUSDC | "Nothing on offer": no holder sells, and new tokens need a holder vote. The GP proposes an amount under Funds, Manager; the GP cannot vote, so approving it takes a second wallet that holds tokens (Govern) |
 | 6 | Trade: Limit, sell 10,000 at 1.0010 | Rests in the book below the issue price, marked "you"; listed under Open orders |
 | 7 | Trade: Market, sell 60,000 | The ladder's 50 bids take 55,511 pBUY at an average of $0.9475, the rest stays in the wallet. Market $0.9038, NAV $1.0031, discount 9.9%: buyback triggered |
-| 8 | Funds, Rules: trigger the buyback (empty = maximum) | 3,524 mUSDC from the vault buy 3,886 pBUY off the lowest rungs and burn them; the cash now bids there. Market $0.9093 |
-| 9 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1611. Every rung and the issue price ($1.1634) move with it. The limit order at $1.0010 keeps its price and is now the cheapest offer in the book |
+| 8 | Funds, Rules: trigger the buyback (empty = maximum) | 3,474 mUSDC from the vault buy 3,831 pBUY off the lowest rungs and burn them; the cash now bids there. Market $0.9093 |
+| 9 | Funds, Manager: revalue the portfolio, 750,000 | NAV $1.1619. Every rung moves with it (top bid $1.1596). The limit order at $1.0010 keeps its price and is now the cheapest offer in the book |
 | 10 | Funds, Rules, after one demo year: mint the fee tranche | 2% of supply in new tokens, locked in vesting |
 
 ### Variant: sell out the whole sale first
@@ -113,7 +113,7 @@ the GP) can close the sale. Numbers from a local run with one non-GP wallet:
 |---|---|---|
 | 1 | Portfolio: get test mUSDC, 9,500,000 | Wallet funded |
 | 2 | Trade: primary sale, 9,500,000 | Sale sold out; the close button opens for every wallet |
-| 3 | Trade: close the sale, open the market | 500,000 mUSDC become fund-owned liquidity (10,000 on each of 50 bid rungs); vault cash 9,000,000; NAV and price $1.00 |
+| 3 | Trade: close the sale, open the market | 500,000 mUSDC become fund-owned liquidity (10,000 on each of 50 bid rungs); vault cash 9,000,000; NAV $1.00, market $0.9980 (top bid) |
 | 4 | Trade: sell 600,000 | The book takes 527,359 pBUY at an average of $0.9475, the rest stays in the wallet. Market $0.9038, NAV $1.0031, discount 9.9%: buyback triggered |
 | 5 | Funds, Rules: trigger the buyback, field empty | 90,004 mUSDC (1% of vault cash) buy and burn 98,647 pBUY; market up to $0.9193 |
 

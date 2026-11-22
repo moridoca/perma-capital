@@ -25,7 +25,13 @@
       'function feeTranchesMinted() view returns (uint256)',
       'function lastFeeMint() view returns (uint256)',
       'function lastBuyback() view returns (uint256)',
-      'function followOnRemaining() view returns (uint256)',
+      'function issuanceApproved() view returns (uint256)',
+      'function issueProposalId() view returns (uint256)',
+      'function issueProposed() view returns (uint256)',
+      'function issueDeadline() view returns (uint256)',
+      'function issueYes() view returns (uint256)',
+      'function issuanceVoteActive() view returns (bool)',
+      'function issueEscrow(uint256 id, address voter) view returns (uint256)',
       'function proposalId() view returns (uint256)',
       'function proposedGP() view returns (address)',
       'function voteDeadline() view returns (uint256)',
@@ -41,7 +47,6 @@
       'function feePerYear() view returns (uint256)',
       'function buybackTriggerPrice() view returns (uint256)',
       'function maxBuyback() view returns (uint256)',
-      'function issuePrice() view returns (uint256)',
       'function eligibleSupply() view returns (uint256)',
       'function voteActive() view returns (bool)',
       'function buy(uint256 tokenAmount)',
@@ -51,8 +56,10 @@
       'function returnProceeds(uint256 amount, uint256 newInvestedValue)',
       'function mintManagementFee()',
       'function buyback(uint256 usdcAmount, uint256[] ids)',
-      'function openFollowOn(uint256 tokenAmount)',
-      'function subscribe(uint256 tokenAmount, uint256 maxPrice)',
+      'function proposeIssuance(uint256 tokenAmount)',
+      'function voteIssuance(uint256 tokenAmount)',
+      'function executeIssuance()',
+      'function withdrawIssuanceVotes(uint256 id)',
       'function proposeRemoveGP(address newGP)',
       'function vote(uint256 tokenAmount)',
       'function executeRemoveGP()',
@@ -65,8 +72,9 @@
       'event NAVUpdated(uint256 navPerToken, uint256 marketPrice, uint256 timestamp)',
       'event ManagementFeeMinted(uint256 tranche, uint256 tokens)',
       'event BuybackExecuted(address indexed caller, uint256 usdcSpent, uint256 tokensBurned, uint256 priceAfter)',
-      'event FollowOnOpened(uint256 tokens)',
-      'event FollowOnSubscribed(address indexed investor, uint256 tokens, uint256 price)',
+      'event IssuanceProposed(uint256 indexed id, uint256 tokens, uint256 deadline)',
+      'event IssuanceVoted(uint256 indexed id, address indexed voter, uint256 tokens)',
+      'event IssuanceApproved(uint256 indexed id, uint256 tokens, uint256 approvedNow)',
       'event RemovalProposed(uint256 indexed id, address indexed proposer, address newGP, uint256 deadline)',
       'event Voted(uint256 indexed id, address indexed voter, uint256 tokens)',
       'event GPRemoved(uint256 indexed id, address oldGP, address newGP, uint256 burnedUnvested)'
@@ -86,7 +94,8 @@
       'event Trade(address indexed trader, bool usdcForToken, uint256 amountIn, uint256 amountOut, uint256 priceAfter)',
       'event OrderPlaced(uint256 indexed id, address indexed maker, bool isBuy, uint256 price, uint256 tokens)',
       'event OrderFilled(uint256 indexed id, address indexed taker, uint256 tokens, uint256 usdc)',
-      'event OrderCancelled(uint256 indexed id)'
+      'event OrderCancelled(uint256 indexed id)',
+      'event Issued(address indexed buyer, uint256 tokens, uint256 usdc)'
     ],
     vesting: [
       'function trancheCount() view returns (uint256)',
@@ -232,9 +241,9 @@
   }
 
   const FUND_KEYS = ['gp', 'saleClosed', 'sold', 'initialSupply', 'investedValue', 'feeTranchesMinted', 'lastFeeMint',
-    'lastBuyback', 'followOnRemaining', 'proposalId', 'proposedGP', 'voteDeadline', 'yesVotes', 'vaultCash', 'netAssets',
+    'lastBuyback', 'issuanceApproved', 'issueProposalId', 'issueProposed', 'issueDeadline', 'issueYes', 'issuanceVoteActive', 'proposalId', 'proposedGP', 'voteDeadline', 'yesVotes', 'vaultCash', 'netAssets',
     'outstandingSupply', 'navPerToken', 'marketPrice', 'premiumBps', 'feePerYear', 'buybackTriggerPrice', 'maxBuyback',
-    'issuePrice', 'eligibleSupply', 'voteActive']
+    'eligibleSupply', 'voteActive']
 
   // Contracts deployed before the order book answer none of its calls: say so instead of a bare read error.
   const oldDeployment = (e) => {
@@ -259,7 +268,7 @@
     d.polTokens = res[n][0]; d.polCash = res[n][1]
     d.totalSupply = res[n + 1]; d.symbol = res[n + 2]
     const l = res[n + 3], o = res[n + 4]
-    d.lad = { prices: [...l[1]], asks: [...l[2]], tokens: [...l[3]], cash: [...l[4]], issue: res[n + 9] }
+    d.lad = { prices: [...l[1]], asks: [...l[2]], tokens: [...l[3]], cash: [...l[4]], issue: res[n + 9], issuable: d.issuanceApproved }
     d.orders = [...o[0]].map((id, k) => ({ id, maker: o[1][k], isBuy: o[2][k], price: o[3][k], tokens: o[4][k] }))
     d.unvested = res[n + 5]; d.claimable = res[n + 6]; d.tranches = res[n + 7]
     BOOK_FEE_BPS = state.fee[f.book] = res[n + 8]
@@ -272,7 +281,8 @@
     const res = await Promise.all([new E.Contract(CFG.usdc, ABI.erc20, p).balanceOf(me),
       ...funds.flatMap((f) => [new E.Contract(f.token, ABI.erc20, p).balanceOf(me), new E.Contract(f.fund, ABI.fund, p).escrowed(f.proposalId, me)])])
     const by = funds.map((f, i) => ({ token: res[1 + i * 2], escrowed: res[2 + i * 2], isGP: f.gp.toLowerCase() === me.toLowerCase() }))
-    return { usdc: res[0], token: by[idx].token, escrowed: by[idx].escrowed, isGP: d.gp.toLowerCase() === me.toLowerCase(), by }
+    const issueLocked = d.issueProposalId > 0n ? await new E.Contract(funds[idx].fund, ABI.fund, p).issueEscrow(d.issueProposalId, me) : 0n
+    return { usdc: res[0], token: by[idx].token, escrowed: by[idx].escrowed, issueLocked, isGP: d.gp.toLowerCase() === me.toLowerCase(), by }
   }
 
   // Event history of one sub-fund, read in block chunks and kept in memory.
@@ -523,7 +533,7 @@
         '<li><b>Primary sale.</b> Investors buy new tokens from the fund at a fixed $1.00. The money goes into the vault.</li>' +
         '<li><b>Close.</b> The GP closes the sale, or it sells out. For every 19 tokens sold, $1 becomes fund-owned liquidity' +
         (d.sold > 0n ? ': at today\'s level ' + amt(pol) + ' mUSDC of bids below NAV.' : '.') + '</li>' +
-        '<li><b>Market.</b> The order book opens around $1.00: the fund bids in fifty 0.2% steps below NAV and issues new tokens just above it; holders add limit orders. Candles from on-chain trades and the NAV line appear here.</li></ol></div>'
+        '<li><b>Market.</b> The order book opens around $1.00: the fund bids in fifty 0.2% steps below NAV and, in the amount holders approve, issues new tokens just above it; holders add limit orders. Candles from on-chain trades and the NAV line appear here.</li></ol></div>'
       return
     }
     if (!cd) { PUT('chartBox').h = '<p class="note">Loading price history…</p>'; return }
@@ -617,7 +627,7 @@
     }
     const asks = levels(false), bids = levels(true)
     // above every offer: the fund issues new tokens, without a size limit
-    const issueRow = '<div class="br ask"><span class="p">' + num(d.lad.issue).toFixed(4) + ' <em>issue</em></span><span>any size</span><span>–</span></div>'
+    const issueRow = d.lad.issuable > 0n ? '<div class="br ask"><span class="p">' + num(d.lad.issue).toFixed(4) + ' <em>issue</em></span><span>' + cmp(num(d.lad.issuable)) + '</span><span>approved</span></div>' : ''
     const mx = Math.max(asks.length ? asks[asks.length - 1].cum : 0, bids.length ? bids[bids.length - 1].cum : 0, 1)
     const row = (r, side) => '<div class="br ' + side + '"><i style="width:' + ((r.cum / mx) * 100).toFixed(1) + '%"></i><span class="p">' + r.px.toFixed(4) + (r.fund ? '' : ' <em>' + (r.own ? 'you' : 'holder') + '</em>') +
       (r.fund && r.own ? ' <em>+you</em>' : '') + '</span><span>' + cmp(r.q) + '</span><span>' + cmp(r.cum) + '</span></div>'
@@ -628,11 +638,11 @@
     }
     const P0 = num(d.marketPrice)
     body.h = '<div class="bh"><span>Price</span><span>Size (' + esc(d.symbol) + ')</span><span>Total (mUSDC)</span></div><div class="basks">' +
-      issueRow + asks.slice().reverse().map((r) => row(r, 'ask')).join('') + '</div>' +
+      (issueRow || asks.length ? issueRow + asks.slice().reverse().map((r) => row(r, 'ask')).join('') : '<div class="bempty">No offers: holders have approved no new tokens</div>') + '</div>' +
       '<div class="bspread"><span>Market</span><span>' + P0.toFixed(4) + '</span><span>' + (d.marketPrice <= d.buybackTriggerPrice ? 'buyback triggered' : '') +
       '</span><span class="bnav">NAV ' + nav.toFixed(4) + '</span></div>' +
       '<div class="bbids">' + (bidHtml || '<div class="bempty">No bids: the ladder\'s cash is used up</div>') + '</div><p class="bfoot">Unmarked rows are the fund\'s own ladder: its cash in fifty 0.2% steps below NAV, moving with NAV and not withdrawable. What a rung bought it offers again 0.1% higher. ' +
-      'Above NAV the fund issues new tokens at NAV +0.2%; the money goes into the vault. Marked rows are holders\' limit orders. Taking costs ' + feeText() + ', resting orders pay nothing.</p>'
+      'Above NAV the fund issues new tokens at NAV +0.2%, as many as holders approved by vote; the money goes into the vault. Marked rows are holders\' limit orders. Taking costs ' + feeText() + ', resting orders pay nothing.</p>'
   }
 
   function renderBottom() {
@@ -669,7 +679,7 @@
       const r = (k, v) => '<tr><td class="l">' + k + '</td><td class="l">' + v + '</td></tr>'
       h = '<table class="tt kv"><tbody>' + r('Vault cash', amt(d.vaultCash) + ' mUSDC') + r('Fund-owned liquidity', amt(d.polTokens) + ' ' + esc(d.symbol) + ' + ' + amt(d.polCash) + ' mUSDC, cannot be withdrawn') +
         r('Invested value', amt(d.investedValue) + ' mUSDC <span class="pill warn">GP-reported</span>') + r('Buyback trigger', usd(d.buybackTriggerPrice) + (below ? ' <span class="pill warn">triggered</span>' : ' · not triggered')) +
-        r('Maximum buyback now', amt(d.maxBuyback) + ' mUSDC (1% of vault cash)') + r('Follow-on', d.followOnRemaining > 0n ? amt(d.followOnRemaining) + ' ' + esc(d.symbol) + ' at ' + usd(d.issuePrice) : 'none open') +
+        r('Maximum buyback now', amt(d.maxBuyback) + ' mUSDC (1% of vault cash)') + r('Approved issuance', d.issuanceApproved > 0n ? amt(d.issuanceApproved) + ' ' + esc(d.symbol) + ' on offer in the book at ' + usd(d.lad.issue) : d.issuanceVoteActive ? 'vote running on ' + amt(d.issueProposed) + ' ' + esc(d.symbol) : 'none: holders have approved no new tokens') +
         r('Fee tranches minted', d.feeTranchesMinted + ' of 10') + '</tbody></table><p class="note">The rules and the buttons that anyone can press are under Funds › Rules.</p>'
     } else {
       h = '<table class="tt"><thead><tr><th class="l">Fund</th><th>Price</th><th>Vs NAV</th><th>NAV</th><th>Net assets</th><th class="l">Status</th><th></th></tr></thead><tbody>' +
@@ -683,7 +693,7 @@
   function renderIpo() {
     const d = state.detail, m = state.me
     const p = Number((d.sold * 10000n) / SALE_CAP) / 100
-    PUT('ipoStatus').h = '<p class="lead">New tokens from the fund at a fixed $1.00. No capital calls later. When the sale closes, $1 for every 19 tokens sold becomes fund-owned liquidity: bids below NAV in the order book. The market opens at $1.00; above NAV the fund issues new tokens.</p>' +
+    PUT('ipoStatus').h = '<p class="lead">New tokens from the fund at a fixed $1.00. No capital calls later. When the sale closes, $1 for every 19 tokens sold becomes fund-owned liquidity: bids below NAV in the order book. The market opens at $1.00; new tokens need a holder vote.</p>' +
       '<div class="qrow"><span>Price</span><span>$1.0000</span></div><div class="qrow"><span>Sold</span><span>' + amt(d.sold) + ' of 9,500,000 (' + p.toFixed(1) + '%)</span></div><div class="meter"><i class="infoc" style="width:' + Math.min(100, p) + '%"></i></div>'
     const acct2 = m ? '<div class="qrow"><span>mUSDC</span><span>' + amt(m.usdc) + '</span></div><div class="qrow"><span>' + esc(d.symbol) + '</span><span>' + amt(m.token) + '</span></div>'
       : '<div class="qrow"><span>' + (window.ethereum ? 'Connect a wallet to buy' : 'Read-only: no wallet in this browser') + '</span><span></span></div>'
@@ -722,9 +732,9 @@
   // One entry per rule: [state of the lamp, status html]. 'off' = needs attention or can be acted on now.
   const RULES = [
     { k: 'sale', t: 'Primary sale', p: 'Fixed $1.00 per token, hard cap of 9,500,000 tokens.', act: 'close' },
-    { k: 'pol', t: 'Fund-owned liquidity', p: 'Sale cash worth 1/19 of the tokens sold goes into the order book as bids in fifty 0.2% steps below NAV; a rung resells what it bought 0.1% higher. The fund has no function to withdraw it. Above NAV it issues new tokens at NAV +0.2%.' },
+    { k: 'pol', t: 'Fund-owned liquidity', p: 'Sale cash worth 1/19 of the tokens sold goes into the order book as bids in fifty 0.2% steps below NAV; a rung resells what it bought 0.1% higher. The fund has no function to withdraw it. ' },
     { k: 'buyback', t: 'Buyback-and-burn', p: 'Anyone can trigger it once the market has fallen to the bottom of the fund\'s ladder, 9.9% below NAV. At most 1% of vault cash per execution.', act: 'buyback' },
-    { k: 'followon', t: 'Follow-on issuance', p: 'New tokens only at the higher of NAV and market price, so new money never dilutes holders.' },
+    { k: 'followon', t: 'New issuance', p: 'New tokens only in the amount holders approved by vote, only through the open order book, only at NAV +0.2%. No placement with chosen buyers, and new money never dilutes holders.' },
     { k: 'fee', t: 'Management fee', p: '2% of initial supply per year, paid in new tokens. Ten tranches at most, each locked for one year.', act: 'fee' },
     { k: 'gov', t: 'GP removal', p: 'More than 50% of eligible supply replaces the GP. Unvested fee tokens are burned.' },
     { k: 'trust', t: 'Trust assumption', p: 'The value of off-chain investments is reported by the GP. It is the one input that is not verified on-chain.' }
@@ -747,9 +757,13 @@
         'market <span class="num">' + usd(d.marketPrice) + '</span> vs trigger <span class="num">' + usd(d.buybackTriggerPrice) + '</span>' +
         '<br>Max size now: <span class="num">' + amt(d.maxBuyback) + '</span> mUSDC' + (below && cool > 0 ? ' · cooldown ' + dur(cool) : '')]
     }
-    if (k === 'followon') return d.followOnRemaining > 0n
-      ? ['off', '<span class="pill live">open</span> <span class="num">' + amt(d.followOnRemaining) + '</span> ' + s + ' at <span class="num">' + usd(d.issuePrice) + '</span>']
-      : [d.saleClosed ? 'ok' : 'idle', 'None open · issue price would be <span class="num">' + usd(d.issuePrice) + '</span>']
+    if (k === 'followon') {
+      if (!d.saleClosed) return ['idle', 'Possible after the sale closes']
+      const price = ' at <span class="num">' + usd(d.lad.issue) + '</span>'
+      if (d.issuanceVoteActive) return ['off', '<span class="pill live">vote running</span> on <span class="num">' + amt(d.issueProposed) + '</span> ' + s + ': ' + (Number((d.issueYes * 10000n) / (d.eligibleSupply || 1n)) / 100).toFixed(1) + '% of eligible supply says yes, ' + dur(Math.max(0, Number(d.issueDeadline) - t)) + ' left']
+      return d.issuanceApproved > 0n ? ['ok', '<span class="pill live">approved</span> <span class="num">' + amt(d.issuanceApproved) + '</span> ' + s + ' on offer in the order book' + price]
+        : ['ok', 'Nothing approved: no new tokens can be issued · the price would be' + price]
+    }
     if (k === 'fee') {
       if (!d.saleClosed) return ['idle', 'Starts when the sale closes']
       const due = Number(d.lastFeeMint) + state.year - t
@@ -791,8 +805,10 @@
       case 'InvestmentsMarked': return 'GP revalued the portfolio ' + amt(a[0]) + ' → ' + amt(a[1]) + ': “' + a[2] + '”'
       case 'ManagementFeeMinted': return 'Management fee tranche ' + a[0] + ': ' + amt(a[1]) + ' ' + s + ' minted into vesting'
       case 'BuybackExecuted': return 'Buyback by ' + short(a[0]) + ': ' + amt(a[1]) + ' mUSDC spent, ' + amt(a[2]) + ' ' + s + ' burned, price now ' + usd(a[3])
-      case 'FollowOnOpened': return 'GP opened a follow-on of ' + amt(a[0]) + ' ' + s
-      case 'FollowOnSubscribed': return short(a[0]) + ' subscribed ' + amt(a[1]) + ' ' + s + ' at ' + usd(a[2])
+      case 'IssuanceProposed': return 'Vote #' + a[0] + ' on new tokens: GP asks holders to approve ' + amt(a[1]) + ' ' + s
+      case 'IssuanceVoted': return short(a[1]) + ' locked ' + amt(a[2]) + ' ' + s + ' as yes votes for the issuance'
+      case 'IssuanceApproved': return 'Holders approved ' + amt(a[1]) + ' new ' + s + '; ' + amt(a[2]) + ' can now be issued in the order book'
+      case 'Issued': return 'Issued ' + amt(a[1]) + ' new ' + s + ' to ' + short(a[0]) + ' in the order book for ' + amt(a[2]) + ' mUSDC'
       case 'RemovalProposed': return 'Vote #' + a[0] + ': ' + short(a[1]) + ' proposed ' + short(a[2]) + ' as new GP'
       case 'Voted': return short(a[1]) + ' locked ' + amt(a[2]) + ' ' + s + ' as yes votes'
       case 'GPRemoved': return 'GP replaced: ' + short(a[1]) + ' → ' + short(a[2]) + '; ' + amt(a[3]) + ' unvested fee tokens burned'
@@ -812,7 +828,7 @@
     const when = (e) => (sc && sc.ts[e.block] !== undefined ? clock(sc.ts[e.block], true) : 'block ' + e.block)
     const txl = (e) => '<a target="_blank" rel="noopener" href="' + esc(CFG.explorer) + '/tx/' + esc(e.tx) + '">tx</a>'
     const primary = sum('Purchased', 1)
-    const followOn = ev.reduce((a, e) => (e.name === 'FollowOnSubscribed' ? a + (e.args[1] * e.args[2] + 10n ** 6n - 1n) / 10n ** 6n : a), 0n)
+    const followOn = ev.reduce((a, e) => (e.name === 'Issued' ? a + e.args[2] : a), 0n)
     const deployed = sum('CapitalDeployed', 1), returned = sum('ProceedsReturned', 1)
     const bbSpent = sum('BuybackExecuted', 1), bbBurned = sum('BuybackExecuted', 2)
     const feeTok = sum('ManagementFeeMinted', 1), feeClaimed = sum('Claimed', 1)
@@ -844,7 +860,7 @@
 
     h += '<div class="rsec"><div class="sechead"><h2>Capital account since launch</h2><small>from events, mUSDC</small></div><div class="rtab"><table class="fin"><tbody>' +
       '<tr class="hd"><td colspan="2">Money in</td></tr>' +
-      fr('Primary sale at $1.00', amt(primary)) + fr('Follow-on subscriptions', amt(followOn)) + fr('Exit proceeds returned', amt(returned)) +
+      fr('Primary sale at $1.00', amt(primary)) + fr('New tokens issued in the order book', amt(followOn)) + fr('Exit proceeds returned', amt(returned)) +
       '<tr class="hd"><td colspan="2">Money out</td></tr>' +
       fr('Capital deployed into investments', neg(deployed)) + fr('Buybacks (tokens burned)', neg(bbSpent), '', amt(bbBurned) + ' ' + s) +
       fr('Distributions to investors', '0', '', 'by design: nothing is paid out') +
@@ -1280,7 +1296,7 @@
     while (m.tokens < maxTokens) {
       let rp = 0n, ra = 0n
       if (buying) { for (; i < n; i++) if (tok[i] > 0n && lad.asks[i] > 0n) { rp = lad.asks[i]; ra = tok[i]; break }
-        if (ra === 0n && lad.issue > 0n) { rp = lad.issue; ra = BOOK_NO_CAP } } // nothing left on the ladder: new issuance
+        if (ra === 0n && lad.issue > 0n && lad.issuable > m.issued) { rp = lad.issue; ra = lad.issuable - m.issued } } // nothing left on the ladder: approved new issuance
       else { for (; i > 0; i--) { const a = bidSize(cash[i - 1], lad.prices[i - 1]); if (a > 0n) { rp = lad.prices[i - 1]; ra = a; break } } }
       let op = 0n, oa = 0n
       for (; j < orders.length; j++) { const o = orders[j]; if (o.tokens > 0n && (buying || (o.tokens * o.price) / U6 > 0n)) { op = o.price; oa = o.tokens; break } }
@@ -1299,7 +1315,7 @@
       else { cash[i - 1] -= c; tok[i - 1] += q }
     }
     m.fee = bookFee(m.cash)
-    m.ladder = { prices: lad.prices, asks: lad.asks, tokens: tok, cash, issue: lad.issue }
+    m.ladder = { prices: lad.prices, asks: lad.asks, tokens: tok, cash, issue: lad.issue, issuable: lad.issuable - m.issued }
     return m
   }
   const bookBuy = (usdcIn, lad, orders) => bookMatch(true, BOOK_NO_CAP, (usdcIn * 10000n) / (10000n + BOOK_FEE_BPS), (1n << 256n) - 1n, lad, orders)
@@ -1309,10 +1325,10 @@
     .sort((a, b) => (a.price === b.price ? (a.id < b.id ? -1 : 1) : (buying ? (a.price < b.price ? -1 : 1) : (a.price > b.price ? -1 : 1)))).slice(0, max || 40)
   // The ladder's own price, as OrderBook.spotPrice() computes it.
   function bookSpot(lad) {
-    let ask = lad.issue, bid = 0n
+    let ask = lad.issuable > 0n ? lad.issue : 0n, bid = 0n
     for (let i = 0; i < lad.asks.length; i++) if (lad.tokens[i] > 0n) { ask = lad.asks[i]; break }
     for (let i = lad.prices.length; i > 0; i--) if (bidSize(lad.cash[i - 1], lad.prices[i - 1]) > 0n) { bid = lad.prices[i - 1]; break }
-    return bid === 0n ? ask : (ask + bid) / 2n
+    return bid === 0n ? ask : ask === 0n ? bid : (ask + bid) / 2n
   }
   // <<< book maths
 
@@ -1340,11 +1356,12 @@
       why: marketOpen,
       quote: (d, m, v) => {
         const sim = bookBuy(v.a, d.lad, hintsFor(d, true))
-        if (sim.tokens === 0n) return null
+        if (sim.tokens === 0n) return [['Nothing on offer', 'no sell orders, and holders have approved no new tokens']]
         const paid = sim.cash + sim.fee
         return [['You pay', amt(paid) + ' mUSDC'], ['You receive about', amt(sim.tokens) + ' ' + d.symbol], ['Average price', usd((paid * U6) / sim.tokens)], ['Last fill at', usd(sim.last)],
           ['Last fill vs NAV', vsNav(sim.last, d.navPerToken)], ['Taker fee (' + feeText() + ')', amt(sim.fee) + ' mUSDC'], ['Minimum received', amt((sim.tokens * 99n) / 100n) + ' ' + d.symbol]]
           .concat(sim.issued > 0n ? [['Newly issued', amt(sim.issued) + ' ' + d.symbol + ' at ' + usd(d.lad.issue)]] : [])
+          .concat(v.a - paid > U6 ? [['Not filled', amt(v.a - paid) + ' mUSDC: nothing more is on offer']] : [])
       },
       steps: async (c, v) => {
         const ids = hintsFor(c.d, true).map((o) => o.id), q = await c.book.quoteBuy(v.a, ids)
@@ -1399,15 +1416,6 @@
     { id: 'cancel', title: 'Cancel order', btn: 'Cancel', fields: [F.text('id')],
       why: () => '',
       steps: async (c, v) => [['Cancelling order #' + v.id, c.book, 'cancel', [BigInt(v.id)]]] },
-    { id: 'subscribe', tab: 'pf', title: 'Follow-on', lead: 'New tokens from the selected fund at the higher of NAV and market price.', btn: 'Subscribe',
-      fields: [F.tok('a')],
-      show: (d) => d.followOnRemaining > 0n,
-      why: (d) => need(d.followOnRemaining > 0n, 'No follow-on is open.'),
-      pre: (d, m, v) => 'Cost about ' + amt((v.a * d.issuePrice) / U6) + ' mUSDC at ' + usd(d.issuePrice),
-      steps: async (c, v) => {
-        const maxPrice = (c.d.issuePrice * 102n) / 100n
-        return [await approval(c, c.usdc, c.f.fund, (v.a * maxPrice) / U6 + 1n, 'mUSDC'), ['Subscribing to the follow-on', c.fund, 'subscribe', [v.a, maxPrice]]]
-      } },
     { id: 'close', inline: true, title: 'Close the sale and open the market', btn: 'Close sale, open market', fields: [],
       show: (d) => !d.saleClosed,
       why: (d, m) => d.saleClosed ? 'The sale is already closed.' : d.sold < 19n * U6 ? 'Nothing has been sold yet.' : (m && m.isGP) || d.sold === SALE_CAP ? '' : 'Only the GP can close before sell-out.',
@@ -1435,10 +1443,10 @@
       why: () => '',
       pre: (d, m, v) => d.outstandingSupply === 0n ? '' : 'NAV per token after: about ' + usd(((d.vaultCash + d.polCash + v.val) * U6) / d.outstandingSupply) + ' (now ' + usd(d.navPerToken) + ')',
       steps: async (c, v) => [['Revaluing the portfolio', c.fund, 'markInvestments', [v.val, v.memo]]] },
-    { id: 'followon', tab: 'gp', gp: true, title: 'Open a follow-on', lead: 'Offer additional tokens. The price is set by the code, not by the GP.', btn: 'Open follow-on', fields: [F.tok('a')],
-      why: (d) => need(d.saleClosed, 'Possible after the sale closes.'),
-      pre: (d) => 'Issue price now: ' + usd(d.issuePrice),
-      steps: async (c, v) => [['Opening the follow-on', c.fund, 'openFollowOn', [v.a]]] },
+    { id: 'followon', tab: 'gp', gp: true, title: 'Propose new tokens', lead: 'Ask holders to approve an amount of new tokens. Approved tokens are offered to everyone in the order book at NAV +0.2%; the GP sets neither price nor buyer.', btn: 'Start the vote', fields: [F.tok('a')],
+      why: (d) => !d.saleClosed ? 'Possible after the sale closes.' : d.issuanceVoteActive ? 'A vote on new tokens is already running.' : '',
+      pre: (d) => 'Already approved and unsold: ' + amt(d.issuanceApproved) + ' · issue price now ' + usd(d.lad.issue),
+      steps: async (c, v) => [['Proposing the issue of new tokens', c.fund, 'proposeIssuance', [v.a]]] },
     { id: 'proceeds', tab: 'gp', gp: true, title: 'Return exit proceeds', lead: 'Cash from an exit goes back into the vault. Nothing is paid out: it compounds.', btn: 'Return proceeds',
       fields: [F.usdc('a'), F.usdc('rest', 'remaining portfolio value')],
       why: () => '',
@@ -1459,6 +1467,20 @@
       show: (d) => d.voteActive,
       why: (d) => !d.voteActive ? 'No vote is running.' : d.yesVotes * 10000n > d.eligibleSupply * 5000n ? '' : 'Threshold of more than 50% not reached.',
       steps: async (c) => [['Executing the GP removal', c.fund, 'executeRemoveGP', []]] },
+    { id: 'ivote', tab: 'govern', title: 'New tokens: vote yes', lead: 'Approve the amount the GP asked for. Your tokens are locked in the fund until the vote ends.', btn: 'Lock tokens and vote yes',
+      fields: [F.tok('a')], chips: [{ l: '50%', pct: 50, of: 'token' }, { l: 'Max', pct: 100, of: 'token' }],
+      show: (d) => d.issuanceVoteActive,
+      why: (d, m) => !d.issuanceVoteActive ? 'No vote on new tokens is running.' : m && m.isGP ? 'The GP cannot vote on his own proposal.' : '',
+      pre: (d) => 'Proposed: ' + amt(d.issueProposed) + ' new ' + d.symbol + ' · yes so far ' + amt(d.issueYes) + ' of ' + amt(d.eligibleSupply) + ' eligible · ' + dur(Math.max(0, Number(d.issueDeadline) - now())) + ' left',
+      steps: async (c, v) => [await approval(c, c.token, c.f.fund, v.a, c.d.symbol), ['Voting yes on the new tokens', c.fund, 'voteIssuance', [v.a]]] },
+    { id: 'iexecute', tab: 'govern', title: 'New tokens: approve', lead: 'Anyone can execute once more than 50% of eligible supply has voted yes. The amount is then on offer in the order book.', btn: 'Approve the issuance', fields: [],
+      show: (d) => d.issuanceVoteActive,
+      why: (d) => !d.issuanceVoteActive ? 'No vote on new tokens is running.' : d.issueYes * 10000n > d.eligibleSupply * 5000n ? '' : 'Threshold of more than 50% not reached.',
+      steps: async (c) => [['Approving the issuance', c.fund, 'executeIssuance', []]] },
+    { id: 'iwithdraw', tab: 'govern', title: 'New tokens: withdraw locked votes', lead: 'Get your tokens back after the vote.', btn: 'Withdraw', ghost: true, fields: [],
+      show: (d, m) => !!m && m.issueLocked > 0n,
+      why: (d, m) => m && m.issueLocked === 0n ? 'You have no tokens locked.' : d.issuanceVoteActive ? 'The vote is still running.' : '',
+      steps: async (c) => [['Withdrawing locked votes', c.fund, 'withdrawIssuanceVotes', [c.d.issueProposalId]]] },
     { id: 'withdraw', tab: 'govern', title: 'Withdraw locked votes', lead: 'Get your tokens back after the vote.', btn: 'Withdraw', ghost: true, fields: [],
       show: (d, m) => !!m && m.escrowed > 0n,
       why: (d, m) => m && m.escrowed === 0n ? 'You have no tokens locked.' : d.voteActive ? 'The vote is still running.' : '',

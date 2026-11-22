@@ -11,6 +11,7 @@ interface IERC20Like {
 interface INavSource {
     function navPerToken() external view returns (uint256);
     function issue(address to, uint256 tokens) external;
+    function issuanceApproved() external view returns (uint256);
 }
 
 /// @title OrderBook - the secondary market of one sub-fund
@@ -26,9 +27,10 @@ interface INavSource {
 ///            profit stays on the rung as more cash to bid with.
 ///
 ///         2. Above NAV, new issuance. Once nothing cheaper is on offer, the
-///            fund issues new tokens at NAV +0.2%. The money goes into the
-///            vault, and because the price is above NAV it never dilutes
-///            holders. The market therefore cannot run away above NAV.
+///            fund issues new tokens at NAV +0.2%, to whoever buys in this
+///            book and only in the amount the token holders have approved by
+///            vote. The money goes into the vault, and because the price is
+///            above NAV it never dilutes holders.
 ///
 ///         3. Limit orders of holders, at any price they choose. They rest in
 ///            the book until someone takes them or the maker cancels.
@@ -178,7 +180,7 @@ contract OrderBook {
     function spotPrice() public view returns (uint256) {
         uint256 nav = _nav();
         if (nav == 0) return 0;
-        uint256 ask = (nav * (BPS + ISSUE_PREMIUM_BPS)) / BPS;
+        uint256 ask = INavSource(fund).issuanceApproved() > 0 ? (nav * (BPS + ISSUE_PREMIUM_BPS)) / BPS : 0;
         uint256 bid;
         for (uint256 i = 0; i < RUNGS; i++) {
             if (rungs[i].tokens > 0) { ask = _ask(nav, i); break; }
@@ -188,6 +190,7 @@ contract OrderBook {
             if (_bidSize(rungs[i - 1].cash, p) > 0) { bid = p; break; }
         }
         if (bid == 0) return ask;
+        if (ask == 0) return bid;
         return (ask + bid) / 2;
     }
 
@@ -214,6 +217,7 @@ contract OrderBook {
         uint256 maxTokens;
         uint256 maxCash;
         uint256 limit;
+        uint256 issuable; // new tokens the holders have approved and this trade has not used
     }
 
     /// @dev Works out a trade without changing anything. `buying` = the taker buys tokens.
@@ -223,7 +227,7 @@ contract OrderBook {
         returns (Match memory m)
     {
         require(seeded, "Book: market not open");
-        Cursor memory c = Cursor(_nav(), buying ? 0 : RUNGS, 0, 0, 0, maxTokens, maxCash, limit);
+        Cursor memory c = Cursor(_nav(), buying ? 0 : RUNGS, 0, 0, 0, maxTokens, maxCash, limit, buying && seeded ? INavSource(fund).issuanceApproved() : 0);
         m.rung = new Rung[](RUNGS);
         for (uint256 n = 0; n < RUNGS; n++) m.rung[n] = rungs[n];
         m.fill = new uint256[](ids.length);
@@ -265,6 +269,7 @@ contract OrderBook {
         } else if (buying && c.i == RUNGS) {
             m.issued += q;
             m.issueCash += cash;
+            c.issuable -= q;
         } else if (buying) {
             m.rung[c.i].tokens -= uint128(q);
             m.rung[c.i].cash += uint128(cash);
@@ -282,9 +287,9 @@ contract OrderBook {
                 price = _ask(c.nav, c.i);
                 if (price > 0) return (price, r[c.i].tokens);
             }
-            // nothing left on the ladder: the fund issues new tokens above NAV
+            // nothing left on the ladder: new tokens above NAV, as far as holders approved them
             price = (c.nav * (BPS + ISSUE_PREMIUM_BPS)) / BPS;
-            if (price > 0) return (price, NO_CAP);
+            if (price > 0 && c.issuable > 0) return (price, c.issuable);
         } else {
             for (; c.i > 0; c.i--) {
                 price = _price(c.nav, c.i - 1);

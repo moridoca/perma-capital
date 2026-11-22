@@ -21,7 +21,7 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
   const [gp, alice, bob, carol, dave, eve] = accts
   const bookAddr = await book.getAddress(), fundAddr = await fund.getAddress()
 
-  const lad = async () => { const [l, issue] = await Promise.all([book.ladder(), book.issuePrice()]); return { nav: l[0], prices: [...l[1]], asks: [...l[2]], tokens: [...l[3]], cash: [...l[4]], issue } }
+  const lad = async () => { const [l, issue, issuable] = await Promise.all([book.ladder(), book.issuePrice(), fund.issuanceApproved()]); return { issuable, nav: l[0], prices: [...l[1]], asks: [...l[2]], tokens: [...l[3]], cash: [...l[4]], issue } }
   const open = async () => { const o = await book.openOrders(); return o[0].map((id, k) => ({ id, maker: o[1][k], isBuy: o[2][k], price: o[3][k], tokens: o[4][k] })) }
   // Every unit in the book is either the fund's ladder or a holder's escrow.
   const invariant = async (label) => {
@@ -56,14 +56,47 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
       assert.strictEqual(l.cash[k], k === 49 ? per + (seed - per * 50n) : per)
     }
     assert.strictEqual(l.issue, 1002000n)
-    assert.strictEqual(await book.spotPrice(), U6); assert.strictEqual(await fund.marketPrice(), U6)
-    assert.strictEqual(await fund.premiumBps(), 0n)
+    assert.strictEqual(await book.spotPrice(), 998000n, 'nothing on offer yet: the market is the top bid')
     assert.strictEqual(await token.totalSupply(), U(1000000), 'no tokens set aside for the book')
     assert.strictEqual(await fund.outstandingSupply(), U(1000000)); assert.strictEqual(await fund.netAssets(), U(1000000))
-    assert.strictEqual(M.bookSpot(l), U6)
+    assert.strictEqual(M.bookSpot(l), 998000n)
   }
   await invariant('seed')
-  ok('ladder seeded: 50 bids from NAV -0.2% to NAV -10% in 0.2% steps, equal cash, each reselling 0.1% higher; new issue offered at NAV +0.2%; NAV 1.0000, market 1.0000')
+  ok('ladder seeded: 50 bids from NAV -0.2% to NAV -10% in 0.2% steps, equal cash, each reselling 0.1% higher; NAV 1.0000')
+
+  // ---------- new tokens only after a holder vote, only through the book ----------
+  {
+    const before = await w.snap()
+    await fails(book.connect(dave).buy(U(1000), 0, []), 'Book: nothing to buy')
+    await fails(fund.connect(alice).proposeIssuance(U(5000)), 'Fund: only GP')
+    await fails(fund.connect(alice).issue(alice.address, U(1)), 'Fund: only the book')
+    await send(fund.proposeIssuance(U(5000)))
+    await fails(fund.proposeIssuance(U(1)), 'Fund: vote already running')
+    await fails(fund.voteIssuance(U(1)), 'Fund: GP cannot vote')
+    await send(fund.connect(bob).voteIssuance(U(300000)))
+    await fails(fund.connect(dave).executeIssuance(), 'Fund: threshold not reached')
+    await send(fund.connect(alice).voteIssuance(U(210000)))
+    await fails(fund.connect(alice).withdrawIssuanceVotes(1), 'Fund: vote still running')
+    await send(fund.connect(dave).executeIssuance())
+    assert.strictEqual(await fund.issuanceApproved(), U(5000))
+    await send(fund.connect(alice).withdrawIssuanceVotes(1)); await send(fund.connect(bob).withdrawIssuanceVotes(1))
+    assert.strictEqual(await token.balanceOf(alice.address), U(600000))
+    assert.strictEqual(await book.spotPrice(), U6, 'bid 0.998, issue 1.002')
+    // 10,000 mUSDC wants more than the 5,000 approved tokens: the buyer gets exactly those, the rest of the money stays
+    const sim = M.bookBuy(U(10000), await lad(), []), u0 = await usdc.balanceOf(dave.address)
+    assert.strictEqual(sim.tokens, U(5000)); assert.strictEqual(sim.issued, U(5000))
+    await send(book.connect(dave).buy(U(10000), sim.tokens, []))
+    assert.strictEqual(await token.balanceOf(dave.address), U(5000)); assert.strictEqual(u0 - await usdc.balanceOf(dave.address), U(5010) + M.bookFee(U(5010)))
+    assert.strictEqual(await fund.issuanceApproved(), 0n)
+    await fails(book.connect(dave).buy(U(1000), 0, []), 'Book: nothing to buy')
+    await invariant('capped issue')
+    ok('new tokens need a holder vote: GP proposes 5,000, more than 50% of eligible supply approves; a buyer in the book gets exactly 5,000 at 1.0020 and no more; nobody can mint otherwise')
+    // for the following checks: holders approve a large amount
+    await w.revert(before)
+    await send(fund.proposeIssuance(U(20000000)))
+    await send(fund.connect(alice).voteIssuance(U(520000))); await send(fund.connect(dave).executeIssuance()); await send(fund.connect(alice).withdrawIssuanceVotes(1))
+    assert.strictEqual(await book.spotPrice(), U6); assert.strictEqual(await fund.premiumBps(), 0n)
+  }
   const base = await w.snap()
   const reset = async () => { await w.revert(base); return w.snap() }
 

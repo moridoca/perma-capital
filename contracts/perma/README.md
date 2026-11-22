@@ -30,7 +30,7 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 | Sale cap | 9,500,000 tokens | SALE_CAP |
 | Fund-owned liquidity | $1 of sale cash for every 19 tokens sold (5.26% of the proceeds); cannot be withdrawn | closeSale |
 | Ladder | 50 bid rungs from NAV -0.2% to NAV -10% in 0.2% steps, equal cash; a rung offers what it bought 0.1% of NAV higher; prices follow NAV | OrderBook.seed, ladder |
-| Issuance above NAV | new tokens at NAV +0.2% once nothing cheaper is on offer; no size limit; payment goes to the vault | OrderBook.issuePrice, SubFund.issue |
+| New issuance | only the amount holders approved by vote (GP proposes, more than 50% of eligible supply says yes); sold only in the order book, to anyone, at NAV +0.2% once nothing cheaper is on offer; payment goes to the vault | proposeIssuance, voteIssuance, executeIssuance, OrderBook.issuePrice |
 | Taker fee | 0.07% of the mUSDC traded, paid to the fund's vault; resting orders pay nothing | TAKER_FEE_BPS |
 | Total supply at launch | 9,500,000 if sold out | initialSupply |
 | Management fee | 2% of initial supply per year, paid in new tokens (190,000) | mintManagementFee |
@@ -38,7 +38,6 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 | Fee lock-up | each tranche unlocks one year after minting | GPVesting |
 | Buyback trigger | market price at the bottom of the ladder, 9.9% below NAV | buyback |
 | Buyback size | at most 1% of vault cash per execution, one per week, anyone can trigger | buyback |
-| Follow-on issue price | the higher of NAV and market price | issuePrice |
 | GP removal | more than 50% of eligible supply votes yes; unvested fee tokens are burned | executeRemoveGP |
 | Eligible supply | total supply minus unvested fee tokens, the fund's own tokens on the ladder and the GP's wallet | eligibleSupply |
 
@@ -52,15 +51,15 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 - Outstanding supply excludes the fund's own tokens on the ladder (treasury stock).
 
 Market price and NAV are two separate numbers, but the fund keeps them close:
-above NAV it issues new tokens at NAV +0.2%, so the market cannot run away
-upwards; below NAV its ladder bids down to NAV -10%. Beyond the ladder only
+above NAV it issues new tokens at NAV +0.2% in the amount holders approved,
+so the market cannot run away upwards while approved tokens last; below NAV its ladder bids down to NAV -10%. Beyond the ladder only
 holders' orders trade, and the buyback rule leans against the discount.
 
 ## The order book
 
 The fund is its own market maker.
 
-    NAV +0.2%          new tokens, any size, money to the vault
+    NAV +0.2%          new tokens, as many as holders approved, money to the vault
     NAV                (nothing: the fund never trades at NAV itself)
     NAV -0.2% ... -10% 50 bids, one fiftieth of the cash on each
 
@@ -85,7 +84,8 @@ The fund is its own market maker.
   best offer. Holders' orders do not count, so posting an order cannot move it.
 
 Compared with the constant-product pool this replaces: an order of 1% of the
-fund moved the pool price by about 19%. Now a buy of any size costs NAV +0.2%,
+fund moved the pool price by about 19%. Now a buy costs NAV +0.2% as long as
+approved tokens last,
 and a sale of 1% of the fund goes through about ten rungs, 2% below NAV.
 
 ## Run the demo
@@ -118,11 +118,12 @@ the order book before trading.
 - The ladder and the issue price follow the GP-reported NAV. A valuation that
   is too high lets holders sell to the fund's bids at too high a price; what is
   exposed there is the cash in the book. A valuation that is too low lets
-  buyers have new tokens too cheaply, without a size limit: that dilutes every
-  holder, and the GP is the one who sets the number. A cap on issuance per
-  period, or issuance only when the GP opens it, would bound this.
-- Issuance has no size limit, so the fund takes in cash whenever buyers pay
-  NAV +0.2%, whether or not the GP has a use for it.
+  buyers have new tokens too cheaply; what is exposed there is the amount
+  holders approved and the book has not sold yet. An approval does not expire.
+- With nothing approved and no holder selling, there is nothing to buy, and
+  the market price shown is the ladder's top bid.
+- The issuance vote needs more than 50% of eligible supply, as the GP removal
+  does. With widely spread holders that is a high bar for a routine decision.
 - Whoever sees a revaluation first can trade against orders that are still
   priced for the old NAV. For the ladder this is harmless (it moves in the same
   transaction); for holders' resting orders it is the usual risk of a limit

@@ -21,13 +21,13 @@ interface IComponentDeployer {
 ///           - sale cash worth 1/19 of the tokens sold as permanent, fund-owned
 ///             liquidity: bids in the order book in equal steps of 0.2% below NAV,
 ///             each reselling what it bought 0.1% higher
-///           - above NAV the fund issues new tokens at NAV +0.2%: the money
-///             goes into the vault and never dilutes holders
+///           - new tokens only in the amount token holders have approved by
+///             vote, only through the open order book, and only at NAV +0.2%:
+///             the money goes into the vault and never dilutes holders
 ///           - management fee paid in tokens: 2% of initial supply per year,
 ///             10-year lifetime cap, each tranche locked for one year
 ///           - buyback-and-burn that anyone can trigger when the market
 ///             has fallen to the bottom of the fund's ladder, 9.9% below NAV
-///           - follow-on issuance only at or above NAV, so new money never dilutes holders
 ///           - token holders can replace the GP; unvested fee tokens are burned
 ///
 ///         What stays a trust assumption: the value of off-chain
@@ -85,8 +85,13 @@ contract SubFund {
     // buyback state
     uint256 public lastBuyback;
 
-    // follow-on state
-    uint256 public followOnRemaining;
+    // issuance state: what holders have approved and the book has not sold yet
+    uint256 public issuanceApproved;
+    uint256 public issueProposalId;
+    uint256 public issueProposed;   // tokens asked for in the running vote
+    uint256 public issueDeadline;
+    uint256 public issueYes;
+    mapping(uint256 => mapping(address => uint256)) public issueEscrow;
 
     // governance state
     uint256 public proposalId;
@@ -97,15 +102,16 @@ contract SubFund {
 
     event Purchased(address indexed investor, uint256 tokens);
     event SaleClosed(uint256 sold, uint256 liquidityTokens, uint256 liquidityUSDC);
-    event Issued(uint256 tokens);
+    event TokensIssued(uint256 tokens, uint256 stillApproved);
     event CapitalDeployed(address indexed to, uint256 amount, string memo);
     event ProceedsReturned(address indexed from, uint256 amount, uint256 newInvestedValue);
     event InvestmentsMarked(uint256 oldValue, uint256 newValue, string memo);
     event NAVUpdated(uint256 navPerToken, uint256 marketPrice, uint256 timestamp);
     event ManagementFeeMinted(uint256 tranche, uint256 tokens);
     event BuybackExecuted(address indexed caller, uint256 usdcSpent, uint256 tokensBurned, uint256 priceAfter);
-    event FollowOnOpened(uint256 tokens);
-    event FollowOnSubscribed(address indexed investor, uint256 tokens, uint256 price);
+    event IssuanceProposed(uint256 indexed id, uint256 tokens, uint256 deadline);
+    event IssuanceVoted(uint256 indexed id, address indexed voter, uint256 tokens);
+    event IssuanceApproved(uint256 indexed id, uint256 tokens, uint256 approvedNow);
     event RemovalProposed(uint256 indexed id, address indexed proposer, address newGP, uint256 deadline);
     event Voted(uint256 indexed id, address indexed voter, uint256 tokens);
     event GPRemoved(uint256 indexed id, address oldGP, address newGP, uint256 burnedUnvested);
@@ -315,42 +321,68 @@ contract SubFund {
     }
 
     // ==================================================================
-    // 5. Follow-on issuance: only at or above NAV
+    // 5. Issuance: only what holders approved, only in the open market,
+    //    only above NAV
     // ==================================================================
 
+    function issuanceVoteActive() public view returns (bool) {
+        return issueProposed > 0 && block.timestamp <= issueDeadline;
+    }
+
+    /// @notice The GP asks holders to approve the issue of up to `tokenAmount`
+    ///         new tokens. He does not set a price and names no buyer: approved
+    ///         tokens are offered to everyone in the order book at NAV +0.2%.
+    function proposeIssuance(uint256 tokenAmount) external onlyGP {
+        require(saleClosed, "Fund: sale open");
+        require(!issuanceVoteActive(), "Fund: vote already running");
+        require(tokenAmount > 0, "Fund: zero amount");
+        issueProposalId += 1;
+        issueProposed = tokenAmount;
+        issueDeadline = block.timestamp + VOTING_PERIOD;
+        issueYes = 0;
+        emit IssuanceProposed(issueProposalId, tokenAmount, issueDeadline);
+    }
+
+    /// @notice Vote yes by locking tokens in the fund until the vote ends.
+    function voteIssuance(uint256 tokenAmount) external {
+        require(issuanceVoteActive(), "Fund: no active vote");
+        require(msg.sender != gp, "Fund: GP cannot vote");
+        require(tokenAmount > 0, "Fund: zero amount");
+        issueEscrow[issueProposalId][msg.sender] += tokenAmount;
+        issueYes += tokenAmount;
+        require(token.transferFrom(msg.sender, address(this), tokenAmount), "Fund: lock failed");
+        emit IssuanceVoted(issueProposalId, msg.sender, tokenAmount);
+    }
+
+    /// @notice Executes as soon as more than 50% of eligible supply voted yes.
+    ///         The amount is added to what the book may issue.
+    function executeIssuance() external {
+        require(issuanceVoteActive(), "Fund: no active vote");
+        require(issueYes * 10_000 > eligibleSupply() * REMOVAL_THRESHOLD_BPS, "Fund: threshold not reached");
+        uint256 amount = issueProposed;
+        issueProposed = 0;
+        issuanceApproved += amount;
+        emit IssuanceApproved(issueProposalId, amount, issuanceApproved);
+    }
+
+    /// @notice Get locked voting tokens back once the vote is over.
+    function withdrawIssuanceVotes(uint256 id) external {
+        require(id < issueProposalId || !issuanceVoteActive(), "Fund: vote still running");
+        uint256 amount = issueEscrow[id][msg.sender];
+        require(amount > 0, "Fund: nothing locked");
+        issueEscrow[id][msg.sender] = 0;
+        require(token.transfer(msg.sender, amount), "Fund: unlock failed");
+    }
+
     /// @notice New tokens for a buyer in the order book, at the book's issue
-    ///         price above NAV. Only the book can call this; it has already
-    ///         sent the payment to this vault.
+    ///         price above NAV, out of what holders approved. Only the book
+    ///         can call this; it has already sent the payment to this vault.
     function issue(address to, uint256 tokenAmount) external {
         require(msg.sender == address(book), "Fund: only the book");
+        require(tokenAmount <= issuanceApproved, "Fund: above the approved issuance");
+        issuanceApproved -= tokenAmount;
         token.mint(to, tokenAmount);
-        emit Issued(tokenAmount);
-    }
-
-    /// @notice GP offers additional tokens. The price is not his choice.
-    function openFollowOn(uint256 tokenAmount) external onlyGP {
-        require(saleClosed, "Fund: sale open");
-        followOnRemaining = tokenAmount;
-        emit FollowOnOpened(tokenAmount);
-    }
-
-    /// @notice Issue price = the higher of NAV and market price.
-    ///         New money never buys in below the value existing holders own.
-    function issuePrice() public view returns (uint256) {
-        uint256 nav = navPerToken();
-        uint256 price = marketPrice();
-        return price > nav ? price : nav;
-    }
-
-    function subscribe(uint256 tokenAmount, uint256 maxPrice) external {
-        require(tokenAmount > 0 && tokenAmount <= followOnRemaining, "Fund: exceeds follow-on");
-        uint256 price = issuePrice();
-        require(price <= maxPrice, "Fund: price above max");
-        followOnRemaining -= tokenAmount;
-        uint256 cost = (tokenAmount * price + ONE - 1) / ONE; // round up in favour of the fund
-        require(usdc.transferFrom(msg.sender, address(this), cost), "Fund: payment failed");
-        token.mint(msg.sender, tokenAmount);
-        emit FollowOnSubscribed(msg.sender, tokenAmount, price);
+        emit TokensIssued(tokenAmount, issuanceApproved);
         _emitNAV();
     }
 

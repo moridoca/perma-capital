@@ -8,7 +8,7 @@
 //
 // The script plays the full life of one sub-fund in about three minutes:
 // launch -> primary sale -> market opens -> capital deployed -> limit order
-// next to the fund's ladder -> sell-off and rule-based buyback -> revaluation -> follow-on at NAV -> management fee and
+// next to the fund's ladder -> sell-off and rule-based buyback -> revaluation -> management fee and
 // vesting -> token holders replace the GP -> exit proceeds compound.
 
 import { ethers } from 'ethers'
@@ -132,6 +132,13 @@ const artifact = async (name: string) => {
     await status('6.0M invested at cost')
 
     console.log('=== 4. Order book: a limit order of a holder next to the ladder of the fund ===')
+    await mustFail('buying when nobody sells and no new tokens are approved', book.connect(carol), 'buy', [units(1000), 0, []])
+    await mustFail('anyone but the GP proposing new tokens', fund.connect(carol), 'proposeIssuance', [units(1)])
+    await send(fund.proposeIssuance(units(1000000)))
+    await send(fund.connect(alice).voteIssuance(units(5000000)))
+    await send(fund.connect(carol).executeIssuance())
+    await send(fund.connect(alice).withdrawIssuanceVotes(1))
+    console.log('  holders approved 1,000,000 new pBUY: on offer in the book at NAV +0.2%, to anyone')
     await send(book.connect(alice).limitSell(units(100000), units(1.001), []))
     console.log('  Alice offers 100,000 pBUY at $1.001, below the price of new tokens (NAV +0.2%)')
     const open = await book.openOrders()
@@ -151,13 +158,10 @@ const artifact = async (name: string) => {
     await send(fund.connect(carol).buyback(units(30000), []))
     await status('anyone triggered a 30,000 buyback: vault cash becomes fresh bids')
 
-    console.log('=== 6. Revaluation and follow-on at NAV ===')
+    console.log('=== 6. Revaluation: the ladder and the issue price follow NAV ===')
     await send(fund.markInvestments(units(7500000), 'Year-end valuation'))
     await status('portfolio marked 6.0M -> 7.5M')
-    await send(fund.openFollowOn(units(500000)))
-    const price = await fund.issuePrice()
-    await send(fund.connect(carol).subscribe(units(100000), price))
-    await status('Carol subscribed 100,000 at ' + fmt(price))
+    console.log('  issue price for the approved tokens is now ' + fmt(await book.issuePrice()) + ', still NAV +0.2%')
 
     console.log('=== 7. Management fee: 2% in tokens, locked for one year ===')
     await mustFail('fee before the year is over', fund, 'mintManagementFee', [])
