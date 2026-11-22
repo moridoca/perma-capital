@@ -120,6 +120,25 @@ info.w3.eth.wait_for_transaction_receipt(info.w3.eth.send_raw_transaction(eve.si
 good(aex.cancel("pBUY", void))
 assert info.vault_details(vault)["openOrders"] == []
 assert Exchange(dave, NET, vault_address=vault, info=info).order("pBUY", True, 10, 1.003)["status"] == "err"  # not leader, not agent
+
+# ---- a strategy from the dashboard's builder, run by the SDK
+from perma.strategy import Runner
+
+rules = {"name": "test", "fund": "pBUY", "postOnly": True, "maxInvestedPct": 80, "requotePct": 0.1, "intervalSec": 1, "rules": [
+    {"side": "buy", "offsetPct": -3, "sizeMode": "pctCash", "size": 20, "when": "always", "whenPct": 0},
+    {"side": "sell", "offsetPct": 1, "sizeMode": "pctPosition", "size": 50, "when": "always", "whenPct": 0}]}
+runner = Runner(vex, rules, log=lambda m: None)
+first = runner.step()
+assert len(first["plan"]["place"]) == 2 and all(x["status"] == "ok" for x in first["results"]), first
+resting = info.vault_details(vault)["openOrders"]
+assert sorted(o["side"] for o in resting) == ["A", "B"], resting
+second = runner.step()
+assert second["plan"] == {"cancel": [], "place": []}, second  # the orders still fit: nothing is touched
+rules["rules"][0]["offsetPct"] = -4  # a changed rule replaces just that order
+third = runner.step()
+assert len(third["plan"]["cancel"]) == 1 and len(third["plan"]["place"]) == 1 and third["plan"]["place"][0]["isBuy"]
+ok("strategy runner: rules place a bid and an offer for the vault, a second check leaves them, a changed rule replaces only its order")
+
 time.sleep(4)  # the local chain's deposit lock is 3 seconds
 before = info.usdc.functions.balanceOf(dave.address).call()
 r = good(Exchange(dave, NET, info=info).vault_usd_transfer(vault, False, 2_000 * ONE))

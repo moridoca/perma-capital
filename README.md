@@ -83,6 +83,13 @@ fraction of every position at market. Shares are a token. Vaults are
 separate from the funds' own bid ladders. Rules and limits: `contracts/perma/README.md`.
 The tab shows a note until a `VaultFactory` address is entered in `docs/config.js`.
 
+**Strategy builder.** A vault's leader describes what the vault should quote as rules relative to NAV
+("buy 25% of the cash at NAV −3%", "offer the whole position at NAV −0.5%", "only while the market is 5%
+below NAV"), starting from a template (discount buyer, market maker, grid, dip only). Preview shows the
+orders the rules give right now. An agent key in the browser runs them while the tab is open; the same
+rules, exported as JSON, run from the Python SDK without a browser. Nothing of this is on-chain: the
+contract still only enforces the vault's limits, and no deployment was needed.
+
 **Fast trading.** Orders without a wallet pop-up, like an agent key on Hyperliquid, built so
 that it would also hold for real money (`contracts/perma/TradingAccount.sol`):
 

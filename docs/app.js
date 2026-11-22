@@ -148,6 +148,8 @@
     'function redeem(uint256 shareAmount, uint256 minUsdcOut, uint256[][] ids) returns (uint256)',
     'function setAgent(address agent, bool allowed)',
     'function agents(address) view returns (bool)',
+    'function cashTotal() view returns (uint256)',
+    'function tokensTotal(uint256 fundIndex) view returns (uint256)',
     'function buy(uint256 fundIndex, uint256 usdcIn, uint256 minTokenOut, uint256[] ids) returns (uint256, uint256)',
     'function sell(uint256 fundIndex, uint256 tokenIn, uint256 minUSDCOut, uint256[] ids) returns (uint256, uint256)',
     'function limitBuy(uint256 fundIndex, uint256 tokenAmount, uint256 price, uint256[] ids) returns (uint256 id, uint256 filled)',
@@ -1022,6 +1024,263 @@
         '</div></div></section>'
     }
     PUT('vl').h = h
+    if (ST.forVault !== (curV() && isLeader() && !curV().closed ? curV().addr : null)) renderStrat()
+  }
+
+  // ---------- Strategy builder for vault leaders ----------
+  // A strategy is a list of rules "quote this side at NAV +/- x% for this size, under this condition".
+  // planStrategy turns it, with the vault's state, into orders to cancel and orders to place. The same
+  // function exists in sdk/python/perma/strategy.py; test/strategy.test.js runs both on the same cases.
+  // >>> strategy maths
+  const S_ONE = 1000000n, S_PPM = 1000000n, S_MAX_ORDERS = 8
+  const sPpm = (pct) => BigInt(Math.round(Number(pct) * 10000)) // 1% = 10,000 ppm
+  function planStrategy(st, v) {
+    const nav = v.nav, invested = (v.tokens * nav) / S_ONE, total = v.cash + invested
+    const cap = (total * sPpm(st.maxInvestedPct)) / S_PPM
+    let cashLeft = cap > invested ? cap - invested : 0n
+    if (cashLeft > v.cash) cashLeft = v.cash
+    let tokLeft = v.tokens
+    const desired = []
+    for (const r of (st.rules || []).slice(0, S_MAX_ORDERS)) {
+      const buy = r.side === 'buy', w = sPpm(r.whenPct || 0)
+      if (r.when === 'marketBelow' && !(v.mid * S_PPM < nav * (S_PPM + w))) continue
+      if (r.when === 'marketAbove' && !(v.mid * S_PPM > nav * (S_PPM + w))) continue
+      let px = (nav * (S_PPM + sPpm(r.offsetPct))) / S_PPM
+      const hi = (nav * 105n) / 100n, lo = (nav * 45n) / 100n // the vault refuses fills outside NAV +5% / -55%
+      if (buy && px > hi) px = hi
+      if (!buy && px < lo) px = lo
+      if (px <= 0n) continue
+      // post-only: a quote that would trade at once is left out instead of taking
+      if (st.postOnly && buy && v.bestAsk > 0n && px >= v.bestAsk) continue
+      if (st.postOnly && !buy && v.bestBid > 0n && px <= v.bestBid) continue
+      let sz = r.sizeMode === 'pctCash' ? (((v.cash * sPpm(r.size)) / S_PPM) * S_ONE) / px
+        : r.sizeMode === 'pctPosition' ? (v.tokens * sPpm(r.size)) / S_PPM
+        : BigInt(Math.round(Number(r.size) * 1e6))
+      if (buy) {
+        if ((sz * px) / S_ONE > cashLeft) sz = (cashLeft * S_ONE) / px
+        if (sz < S_ONE) continue
+        cashLeft -= (sz * px) / S_ONE
+      } else {
+        if (sz > tokLeft) sz = tokLeft
+        if (sz < S_ONE) continue
+        tokLeft -= sz
+      }
+      desired.push({ isBuy: buy, px, sz })
+    }
+    // keep resting orders that still fit, cancel the rest, place what is missing
+    const tol = (nav * sPpm(st.requotePct)) / S_PPM, used = new Set(), place = []
+    for (const d of desired) {
+      const hit = v.orders.find((o) => !used.has(o.oid) && o.isBuy === d.isBuy && (o.px > d.px ? o.px - d.px : d.px - o.px) <= tol && o.sz * 2n >= d.sz && o.sz <= d.sz * 2n)
+      if (hit) used.add(hit.oid)
+      else place.push(d)
+    }
+    return { cancel: v.orders.filter((o) => !used.has(o.oid)).map((o) => o.oid), place: place.slice(0, Math.max(0, S_MAX_ORDERS - used.size)) }
+  }
+  // <<< strategy maths
+
+  const ST_TEMPLATES = {
+    discount: { label: 'Discount buyer', hint: 'Bids below NAV, offers what it holds close to NAV. Takes offers that are already cheaper than its bids.', postOnly: false, maxInvestedPct: 80, requotePct: 0.1, intervalSec: 20, rules: [
+      { side: 'buy', offsetPct: -3, sizeMode: 'pctCash', size: 25, when: 'always', whenPct: 0 },
+      { side: 'buy', offsetPct: -6, sizeMode: 'pctCash', size: 25, when: 'always', whenPct: 0 },
+      { side: 'sell', offsetPct: -0.5, sizeMode: 'pctPosition', size: 100, when: 'always', whenPct: 0 }] },
+    maker: { label: 'Market maker', hint: 'A bid and an offer close around NAV, inside the fund\'s own 0.2% steps. Post-only: it never takes.', postOnly: true, maxInvestedPct: 50, requotePct: 0.02, intervalSec: 10, rules: [
+      { side: 'buy', offsetPct: -0.05, sizeMode: 'tokens', size: 250, when: 'always', whenPct: 0 },
+      { side: 'sell', offsetPct: 0.05, sizeMode: 'tokens', size: 250, when: 'always', whenPct: 0 }] },
+    grid: { label: 'Grid', hint: 'Three bids below NAV and three offers above, 0.5% apart. Post-only.', postOnly: true, maxInvestedPct: 60, requotePct: 0.1, intervalSec: 20, rules: [
+      { side: 'buy', offsetPct: -0.5, sizeMode: 'tokens', size: 200, when: 'always', whenPct: 0 }, { side: 'buy', offsetPct: -1, sizeMode: 'tokens', size: 200, when: 'always', whenPct: 0 },
+      { side: 'buy', offsetPct: -1.5, sizeMode: 'tokens', size: 200, when: 'always', whenPct: 0 }, { side: 'sell', offsetPct: 0.5, sizeMode: 'tokens', size: 200, when: 'always', whenPct: 0 },
+      { side: 'sell', offsetPct: 1, sizeMode: 'tokens', size: 200, when: 'always', whenPct: 0 }, { side: 'sell', offsetPct: 1.5, sizeMode: 'tokens', size: 200, when: 'always', whenPct: 0 }] },
+    dip: { label: 'Dip only', hint: 'Buys only while the market is 5% or more below NAV; sells when it is back within 1%.', postOnly: false, maxInvestedPct: 90, requotePct: 0.1, intervalSec: 20, rules: [
+      { side: 'buy', offsetPct: -5, sizeMode: 'pctCash', size: 50, when: 'marketBelow', whenPct: -5 },
+      { side: 'sell', offsetPct: -1, sizeMode: 'pctPosition', size: 100, when: 'marketAbove', whenPct: -1.5 }] },
+    empty: { label: 'Empty', hint: 'Start from nothing.', postOnly: true, maxInvestedPct: 50, requotePct: 0.1, intervalSec: 20, rules: [] }
+  }
+  const ST = { key: (v) => 'perma.st.' + CFG.chainId + '.' + v.addr.toLowerCase(), agentKey: (v) => 'perma.va.' + CFG.chainId + '.' + v.addr.toLowerCase(), cur: null, forVault: null, run: null, preview: '', io: '', agent: null, agentEth: null }
+  const stClone = (t) => JSON.parse(JSON.stringify(t))
+  function stLoad(v) {
+    if (ST.forVault === v.addr) return
+    ST.forVault = v.addr; ST.preview = ''; ST.io = ''; ST.agentEth = null
+    let saved = null
+    try { saved = JSON.parse(store.get(ST.key(v)) || 'null') } catch (e) { saved = null }
+    ST.cur = saved || Object.assign({ name: 'Discount buyer', template: 'discount', fund: (state.funds[state.selected] || {}).symbol || 'pBUY' }, stClone(ST_TEMPLATES.discount))
+    const pk = store.get(ST.agentKey(v))
+    ST.agent = pk ? new E.Wallet(pk) : null
+  }
+  const stExport = () => JSON.stringify({ name: ST.cur.name, fund: ST.cur.fund, postOnly: !!ST.cur.postOnly, intervalSec: Number(ST.cur.intervalSec), maxInvestedPct: Number(ST.cur.maxInvestedPct), requotePct: Number(ST.cur.requotePct),
+    rules: ST.cur.rules.map((r) => ({ side: r.side, offsetPct: Number(r.offsetPct), sizeMode: r.sizeMode, size: Number(r.size), when: r.when, whenPct: Number(r.whenPct) })) }, null, 2)
+  function stCheck(st) {
+    const num = (x) => typeof x === 'number' && isFinite(x)
+    if (!st || !Array.isArray(st.rules)) throw new Error('No rules found.')
+    if (st.rules.length > S_MAX_ORDERS) throw new Error('At most 8 rules: a vault can have 8 open orders.')
+    if (!state.funds.some((f) => f.symbol === st.fund)) throw new Error('Unknown fund ' + st.fund + '.')
+    if (!(num(st.maxInvestedPct) && st.maxInvestedPct >= 0 && st.maxInvestedPct <= 100)) throw new Error('Max invested: 0 to 100%.')
+    if (!(num(st.requotePct) && st.requotePct >= 0 && st.requotePct <= 5)) throw new Error('Re-quote threshold: 0 to 5%.')
+    if (!(num(st.intervalSec) && st.intervalSec >= 5)) throw new Error('Interval: at least 5 seconds.')
+    st.rules.forEach((r, i) => {
+      if (r.side !== 'buy' && r.side !== 'sell') throw new Error('Rule ' + (i + 1) + ': side is buy or sell.')
+      if (!(num(r.offsetPct) && r.offsetPct > -100 && r.offsetPct <= 100)) throw new Error('Rule ' + (i + 1) + ': price offset in % of NAV.')
+      if (!['tokens', 'pctCash', 'pctPosition'].includes(r.sizeMode) || !(num(r.size) && r.size > 0)) throw new Error('Rule ' + (i + 1) + ': enter a size.')
+      if (r.sizeMode === 'pctCash' && r.side !== 'buy') throw new Error('Rule ' + (i + 1) + ': "% of cash" sizes a buy.')
+      if (r.sizeMode === 'pctPosition' && r.side !== 'sell') throw new Error('Rule ' + (i + 1) + ': "% of position" sizes a sell.')
+      if (r.sizeMode !== 'tokens' && r.size > 100) throw new Error('Rule ' + (i + 1) + ': at most 100%.')
+      if (!['always', 'marketBelow', 'marketAbove'].includes(r.when) || !num(r.whenPct)) throw new Error('Rule ' + (i + 1) + ': check the condition.')
+    })
+    return st
+  }
+  async function stState(v, st) {
+    const idx = state.funds.findIndex((f) => f.symbol === st.fund), f = state.funds[idx]
+    return read(async (p) => {
+      const fund = new E.Contract(f.fund, ABI.fund, p), vc = new E.Contract(v.addr, ABI.vault, p), book = new E.Contract(f.book, ABI.book, p)
+      const [nav, mid, cash, tokens, vo, bo, lad, issue, issuable] = await Promise.all([fund.navPerToken(), fund.marketPrice(), vc.cashTotal(), vc.tokensTotal(idx), vc.openOrders(), book.openOrders(),
+        book.ladder(), book.issuePrice(), fund.issuanceApproved()])
+      const orders = [...vo[0]].map((x, k) => ({ fund: Number(x), oid: vo[1][k], isBuy: vo[2][k], px: vo[3][k], sz: vo[4][k] })).filter((o) => o.fund === idx && o.sz > 0n)
+      const all = [...bo[0]].map((id, k) => ({ id, maker: bo[1][k], isBuy: bo[2][k], price: bo[3][k], tokens: bo[4][k] }))
+      // best prices of everyone else: the fund's ladder, approved new tokens, other makers' orders
+      let bestBid = 0n, bestAsk = issuable > 0n ? issue : 0n
+      for (let i = 0; i < lad[1].length; i++) {
+        if (lad[4][i] > 0n && lad[1][i] > bestBid) bestBid = lad[1][i]
+        if (lad[3][i] > 0n && (bestAsk === 0n || lad[2][i] < bestAsk)) bestAsk = lad[2][i]
+      }
+      for (const o of all) {
+        if (o.tokens === 0n || o.maker.toLowerCase() === v.addr.toLowerCase()) continue
+        if (o.isBuy && o.price > bestBid) bestBid = o.price
+        if (!o.isBuy && (bestAsk === 0n || o.price < bestAsk)) bestAsk = o.price
+      }
+      return { idx, f, nav, mid, cash, tokens, orders, all, bestBid, bestAsk }
+    })
+  }
+  const stLine = (o, sym) => (o.isBuy ? 'buy ' : 'sell ') + amt(o.sz) + ' ' + sym + ' at ' + num(o.px).toFixed(4)
+  async function stPreview() {
+    const v = curV(), st = stCheck(JSON.parse(stExport())), s = await stState(v, st), plan = planStrategy(st, s)
+    const out = ['NAV ' + num(s.nav).toFixed(4) + ' · market ' + num(s.mid).toFixed(4) + ' · vault: ' + amt(s.cash) + ' mUSDC, ' + amt(s.tokens) + ' ' + st.fund + ', ' + s.orders.length + ' open order(s) · best bid ' + (s.bestBid ? num(s.bestBid).toFixed(4) : '–') + ', best offer ' + (s.bestAsk ? num(s.bestAsk).toFixed(4) : '–')]
+    for (const id of plan.cancel) out.push('cancel #' + id)
+    for (const o of plan.place) out.push('place: ' + stLine(o, st.fund))
+    if (!plan.cancel.length && !plan.place.length) out.push('Nothing to do right now: the open orders already match the rules, no rule applies, or post-only holds a quote back.')
+    return out.join('\n')
+  }
+  async function stAgentSend(label, make) {
+    if (!state.provider) state.provider = makeProvider(state.rpcIndex)
+    const a = ST.agent.connect(state.provider)
+    const n = await read((p) => p.getTransactionCount(ST.agent.address, 'pending'))
+    const nonce = ST.run && ST.run.nonce != null ? Math.max(n, ST.run.nonce) : n
+    const tx = await make(a, Object.assign(feeOverrides(), { nonce }))
+    if (ST.run) ST.run.nonce = nonce + 1
+    const rc = await confirmFast(tx)
+    log('  ' + label + ': block ' + rc.blockNumber)
+  }
+  async function stTick() {
+    const run = ST.run
+    if (!run || run.busy) return
+    run.busy = true
+    try {
+      const v = state.vaults.find((x) => x.addr === run.vault)
+      if (!v || v.closed) throw new Error('The vault is closed or gone.')
+      const s = await stState(v, run.st), plan = planStrategy(run.st, s)
+      run.ticks += 1
+      if (plan.cancel.length || plan.place.length) log('Strategy "' + run.st.name + '" on ' + v.name + ': ' + plan.cancel.length + ' to cancel, ' + plan.place.length + ' to place (NAV ' + num(s.nav).toFixed(4) + ')')
+      for (const id of plan.cancel) await stAgentSend('cancelled #' + id, (a, o) => new E.Contract(v.addr, ABI.vault, a).cancel(s.idx, id, o))
+      for (const q of plan.place) {
+        const ids = bookHints(q.isBuy, s.all.filter((o) => o.maker.toLowerCase() !== v.addr.toLowerCase()), q.px).map((o) => o.id)
+        await stAgentSend(stLine(q, run.st.fund), (a, o) => new E.Contract(v.addr, ABI.vault, a)[q.isBuy ? 'limitBuy' : 'limitSell'](s.idx, q.sz, q.px, ids, o))
+        run.orders += 1
+      }
+      run.err = 0
+      if (plan.cancel.length || plan.place.length) refresh(true)
+    } catch (e) {
+      run.err = (run.err || 0) + 1
+      log('Strategy: ' + reason(e), true)
+      if (run.err >= 3) { log('Strategy stopped after three failures in a row.', true); stStop() }
+    } finally { run.busy = false; renderStrat() }
+  }
+  function stStop() { if (ST.run) { clearInterval(ST.run.timer); ST.run = null } renderStrat() }
+  function renderStrat() {
+    const el = $('vstrat'); if (!el) return
+    const v = curV()
+    if (!v || !isLeader() || v.closed || !state.funds.length) { el.innerHTML = ''; ST.forVault = null; return }
+    stLoad(v)
+    const st = ST.cur, running = ST.run && ST.run.vault === v.addr
+    const opt = (val, label, cur) => '<option value="' + val + '"' + (val === cur ? ' selected' : '') + '>' + label + '</option>'
+    const inp = (k, val, w) => '<input data-sk="' + k + '" value="' + esc(String(val)) + '" inputmode="decimal" autocomplete="off" style="width:' + (w || 64) + 'px"' + (running ? ' disabled' : '') + '>'
+    const dis = running ? ' disabled' : ''
+    let h = '<div class="card stcard"><h3>Strategy builder</h3><p class="lead">Describe what the vault should quote, as rules relative to NAV. Preview shows the orders the rules give right now. ' +
+      'Running it needs an agent key in this browser: it can only trade for this vault, and it runs only while this tab is open. The same rules run from the Python SDK (Export).</p>' +
+      '<div class="strow"><label>Template <select data-sk="template"' + dis + '>' + Object.keys(ST_TEMPLATES).map((k) => opt(k, ST_TEMPLATES[k].label, st.template)).join('') + '</select></label>' +
+      '<label>Name ' + '<input data-sk="name" value="' + esc(st.name) + '" style="width:150px"' + dis + '></label>' +
+      '<label>Fund <select data-sk="fund"' + dis + '>' + state.funds.map((f) => opt(f.symbol, f.symbol, st.fund)).join('') + '</select></label>' +
+      '<label>Max invested ' + inp('maxInvestedPct', st.maxInvestedPct, 48) + ' %</label><label>Re-quote when off by ' + inp('requotePct', st.requotePct, 48) + ' % of NAV</label>' +
+      '<label>Check every ' + inp('intervalSec', st.intervalSec, 48) + ' s</label>' +
+      '<label><input type="checkbox" data-sk="postOnly"' + (st.postOnly ? ' checked' : '') + dis + '> Post-only (never take)</label></div>' +
+      '<p class="note">' + esc((ST_TEMPLATES[st.template] || {}).hint || '') + '</p>' +
+      '<table class="tt sttab"><thead><tr><th class="l">#</th><th class="l">Side</th><th class="l">Price</th><th class="l">Size</th><th class="l">When</th><th></th></tr></thead><tbody>' +
+      st.rules.map((r, i) => '<tr><td class="l">' + (i + 1) + '</td><td class="l"><select data-sk="r.' + i + '.side"' + dis + '>' + opt('buy', 'Buy', r.side) + opt('sell', 'Sell', r.side) + '</select></td>' +
+        '<td class="l">NAV ' + inp('r.' + i + '.offsetPct', r.offsetPct, 56) + ' %</td>' +
+        '<td class="l">' + inp('r.' + i + '.size', r.size, 70) + ' <select data-sk="r.' + i + '.sizeMode"' + dis + '>' + opt('tokens', 'tokens', r.sizeMode) + opt('pctCash', '% of cash', r.sizeMode) + opt('pctPosition', '% of position', r.sizeMode) + '</select></td>' +
+        '<td class="l"><select data-sk="r.' + i + '.when"' + dis + '>' + opt('always', 'always', r.when) + opt('marketBelow', 'market below NAV', r.when) + opt('marketAbove', 'market above NAV', r.when) + '</select> ' + inp('r.' + i + '.whenPct', r.whenPct, 48) + ' %</td>' +
+        '<td><button class="tlink" data-st="del" data-i="' + i + '"' + dis + '>remove</button></td></tr>').join('') +
+      (st.rules.length ? '' : '<tr><td class="l" colspan="6">No rules yet.</td></tr>') + '</tbody></table>' +
+      '<div class="stbtns"><button class="btn ghost sm" data-st="add"' + (running || st.rules.length >= S_MAX_ORDERS ? ' disabled' : '') + '>Add rule</button>' +
+      '<button class="btn sm" data-st="preview">Preview</button><button class="btn ghost sm" data-st="save"' + dis + '>Save</button>' +
+      '<button class="btn ghost sm" data-st="export">Export</button><button class="btn ghost sm" data-st="import"' + dis + '>Import</button></div>'
+    if (ST.preview) h += '<pre class="stpre" id="st-preview">' + esc(ST.preview) + '</pre>'
+    if (ST.io !== '') h += '<textarea class="stio" id="st-io" spellcheck="false">' + esc(ST.io) + '</textarea><p class="note">Export: save this as strategy.json and run <code>python3 examples/run_strategy.py strategy.json</code> from sdk/python. Import: paste rules here, then press Import again.</p>'
+    h += '<div class="stagent"><b>Agent</b> '
+    if (!ST.agent) h += 'none in this browser. <button class="btn ghost sm" data-st="agent"' + ((state.mm || {}).signer ? '' : ' disabled') + '>Create agent key</button><span class="note"> Two MetaMask confirmations: name the key as agent of this vault, send it ' + esc(CFG.tkGas || '0.002') + ' ETH for gas.</span>'
+    else h += link(ST.agent.address) + ' · gas ' + (ST.agentEth === null ? '–' : Number(E.formatEther(ST.agentEth)).toFixed(5) + ' ETH') + ' ' +
+      (running ? '<span class="pill live">running</span> ' + ST.run.ticks + ' checks, ' + ST.run.orders + ' order(s) placed <button class="btn sm" data-st="stop">Stop</button>'
+        : '<button class="btn sm" data-st="start">Start</button> <button class="btn ghost sm" data-st="unagent"' + ((state.mm || {}).signer ? '' : ' disabled') + '>Remove agent</button>')
+    h += '</div><p class="note">The rules are not stored on-chain and nothing forces the leader to follow them. Stopping leaves the open orders in the book; cancel them above if you want them gone.</p></div>'
+    el.innerHTML = h
+  }
+  async function stAction(what, btn) {
+    const v = curV(); if (!v) return
+    const st = ST.cur
+    try {
+      if (what === 'add') { st.rules.push({ side: 'buy', offsetPct: -1, sizeMode: 'tokens', size: 100, when: 'always', whenPct: 0 }); st.template = 'empty' }
+      else if (what === 'del') { st.rules.splice(Number(btn.dataset.i), 1) }
+      else if (what === 'preview') { ST.preview = 'Reading the vault…'; renderStrat(); ST.preview = await stPreview() }
+      else if (what === 'save') { stCheck(JSON.parse(stExport())); store.set(ST.key(v), JSON.stringify(Object.assign(JSON.parse(stExport()), { template: st.template }))); log('Strategy "' + st.name + '" saved in this browser.') }
+      else if (what === 'export') { ST.io = stExport() }
+      else if (what === 'import') {
+        const box = $('st-io')
+        if (!box || !box.value.trim()) { ST.io = ' ' } else {
+          const inSt = stCheck(JSON.parse(box.value))
+          ST.cur = Object.assign({ name: inSt.name || 'Imported', template: 'empty' }, inSt); ST.io = ''; ST.preview = ''
+          log('Strategy imported: ' + ST.cur.rules.length + ' rule(s).')
+        }
+      } else if (what === 'agent') {
+        const mm = state.mm || {}
+        if (!mm.signer) throw new Error('Connect MetaMask on ' + CFG.network + ' first.')
+        const w = E.Wallet.createRandom(), vc = new E.Contract(v.addr, ABI.vault, mm.signer)
+        await mmSend('Naming ' + short(w.address) + ' as agent of ' + v.name, (s) => vc.connect(s).setAgent(w.address, true, feeOverrides()))
+        store.set(ST.agentKey(v), w.privateKey); ST.agent = new E.Wallet(w.privateKey)
+        await mmSend('Sending the agent ' + (CFG.tkGas || '0.002') + ' ETH for gas', (s) => s.sendTransaction(Object.assign({ to: w.address, value: E.parseEther(CFG.tkGas || '0.002') }, feeOverrides())))
+      } else if (what === 'unagent') {
+        const mm = state.mm || {}, vc = new E.Contract(v.addr, ABI.vault, mm.signer)
+        await mmSend('Ending the agent ' + short(ST.agent.address), (s) => vc.connect(s).setAgent(ST.agent.address, false, feeOverrides()))
+        store.set(ST.agentKey(v), null); ST.agent = null
+      } else if (what === 'start') {
+        const run = stCheck(JSON.parse(stExport()))
+        if (!run.rules.length) throw new Error('Add at least one rule.')
+        const ok = await read((p) => new E.Contract(v.addr, ABI.vault, p).agents(ST.agent.address))
+        if (!ok) throw new Error('This key is no longer an agent of the vault. Remove it and create a new one.')
+        ST.run = { vault: v.addr, st: run, ticks: 0, orders: 0, busy: false, nonce: null, err: 0, timer: setInterval(stTick, run.intervalSec * 1000) }
+        log('Strategy "' + run.name + '" started on ' + v.name + ': checks every ' + run.intervalSec + ' s while this tab is open.')
+        stTick()
+      } else if (what === 'stop') { log('Strategy stopped. Open orders stay in the book.'); stStop(); return }
+      if (ST.agent) { try { ST.agentEth = await read((p) => p.getBalance(ST.agent.address)) } catch (e) { /* shown as – */ } }
+    } catch (e) { log('Strategy builder: ' + reason(e), true); if (what === 'preview') ST.preview = '' }
+    renderStrat()
+  }
+  function stInput(el) {
+    const k = el.dataset.sk, st = ST.cur
+    if (!st) return
+    const numeric = (x) => { const n = Number(String(x).replace(',', '.')); return isFinite(n) ? n : 0 }
+    if (k === 'template') { const t = ST_TEMPLATES[el.value]; Object.assign(st, stClone(t), { template: el.value, name: t.label }); ST.preview = ''; renderStrat(); return }
+    if (k.startsWith('r.')) {
+      const [, i, f] = k.split('.'), r = st.rules[Number(i)]
+      r[f] = (f === 'side' || f === 'sizeMode' || f === 'when') ? el.value : numeric(el.value)
+      if (f === 'side') { if (r.side === 'buy' && r.sizeMode === 'pctPosition') r.sizeMode = 'pctCash'; if (r.side === 'sell' && r.sizeMode === 'pctCash') r.sizeMode = 'pctPosition'; renderStrat() }
+    } else st[k] = k === 'postOnly' ? el.checked : (k === 'name' || k === 'fund') ? el.value : numeric(el.value)
   }
 
   // ---------- Govern ----------
@@ -1879,7 +2138,8 @@
     const t = e.target
     const tkB = t.closest('[data-tk]'); if (tkB) { if (!tkB.disabled) tkClick(tkB.dataset.tk); return }
     const tabB = t.closest('[data-tab]'); if (tabB) { setTab(tabB.dataset.tab); return }
-    const vRow = t.closest('[data-vault]'); if (vRow && !t.closest('a')) { state.vsel = Number(vRow.dataset.vault); renderVaults(); updateActions(); return }
+    const vRow = t.closest('[data-vault]'); if (vRow && !t.closest('a')) { state.vsel = Number(vRow.dataset.vault); renderVaults(); updateActions(); renderStrat(); return }
+    const stB = t.closest('[data-st]'); if (stB) { stAction(stB.dataset.st, stB); return }
     if (t.closest('#fbtn') || t.closest('[data-open-funds]')) { state.fsel = !state.fsel; renderTop(); if (state.fsel) { const q = $('f-q'); if (q && window.innerWidth >= 700) q.focus() } return }
     const ff = t.closest('[data-ff]'); if (ff) { state.ff = ff.dataset.ff; $('fpanel').innerHTML = ''; renderTop(); return }
     const fundEl = t.closest('[data-fund]'); if (fundEl) { const i = Number(fundEl.dataset.fund); const go = fundEl.dataset.go; selectFund(i); if (go && state.tab !== go) setTab(go); return }
@@ -1930,6 +2190,7 @@
   }
   document.addEventListener('input', (e) => {
     if (e.target.id === 'f-q') { state.fq = e.target.value; PUT('f-list').h = fundList(); return }
+    if (e.target.dataset && e.target.dataset.sk) { stInput(e.target); return }
     if (e.target.classList.contains('orange')) { setPct(e.target.closest('[data-a]'), Number(e.target.value)); return }
     if (e.target.closest('[data-a]')) updateActions()
   })
