@@ -1,0 +1,36 @@
+{
+  "network": "arbitrum-sepolia",
+  "chainId": 421614,
+  "deployBlock": 331513588,
+  "gp": "0x4541C852aDdC826ea6D4A1fF6d55e855490FaCc7",
+  "yearSeconds": 300,
+  "votingSeconds": 180,
+  "usdc": "0x232dA8232534064007557E29A9186240c567B64D",
+  "components": "0x4B93e16FC9d99580A4EB94ff8A5977790Ec62193",
+  "fundDeployer": "0x748148cBe50E7082733E085E295987553A63EF07",
+  "umbrella": "0x15690c82c8aabda3F5689157ebF637A4F5c8e672",
+  "tradingAccounts": "0x12acA0B765732b7db6484bf8844bBD21d394e3bF",
+  "subFunds": [
+    {
+      "name": "Perma Buyout",
+      "fund": "0x078526Fd41949e907326378794EF47B56d145c47",
+      "token": "0xE8d37e2758f9AC361007893090faDefF3c254902",
+      "pool": "0xcD85A1f33996220Ea297Be3164B5F8172a1e318F",
+      "vesting": "0xE50FB717fF4c728F1B21a3d7412Ba1687110272A"
+    },
+    {
+      "name": "Perma Growth",
+      "fund": "0x16F1De8877aB2A18eEFE1f49cf3bfDDFD0c469C6",
+      "token": "0xfC7214274F5b80901300Ed394CE7aD46ef3bd258",
+      "pool": "0x5AFbaD710d3201A936f45ceb7A65c797b534d153",
+      "vesting": "0x9271DA9d869C9caF720c7C8ea82E793acfe6B32F"
+    },
+    {
+      "name": "Perma Agriculture",
+      "fund": "0x6D3494e3ab8B6819A6322d4a05D5c66F08cA12BD",
+      "token": "0x4CEb09f72cB5eb571fAddE1e4bF192Ea8E97C86c",
+      "pool": "0xa46CD97530041c4260577cee97AFe912601174Ba",
+      "vesting": "0xf6deeB8341df6542FEF8cEb2A1A1Cf5C76F92dc9"
+    }
+  ]
+}
