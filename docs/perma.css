@@ -408,3 +408,14 @@ nav.tabs svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stro
 /* Vaults */
 .vgrid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start; margin-top: 14px; }
 .tt tr[aria-selected="true"] { background: var(--panel2); }
+
+/* Strategy builder */
+#vstrat { margin-top: 14px; }
+.stcard select, .stcard input, .stio { background: var(--panel2); color: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit; }
+.strow { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 8px 0; }
+.strow label { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.sttab td { padding-top: 5px; padding-bottom: 5px; }
+.stbtns { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.stpre { white-space: pre-wrap; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 12px; }
+.stio { width: 100%; min-height: 180px; font-family: ui-monospace, monospace; font-size: 12px; margin-top: 8px; }
+.stagent { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

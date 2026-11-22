@@ -17,6 +17,9 @@ at the lower), agents, share transfers, the lock, the 10% profit share, withdraw
 with the sale of the position part (and in tokens when the book has no bids), dividends,
 and closing.
 
+`strategy.test.js` runs the strategy planner of the dashboard and the one of the Python SDK on the
+same cases and compares them (needs python3).
+
 The previews of the dashboard are part of the test: the book maths is cut out of
 `docs/app.js` and compared with the contract's own quotes, unit for unit. `STEPS=400 npm
 test` lengthens the random run.

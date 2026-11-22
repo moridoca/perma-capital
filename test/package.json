@@ -3,7 +3,7 @@
   "private": true,
   "description": "Compiles contracts/perma and runs the order book and vault tests on a local chain.",
   "scripts": {
-    "test": "node compile.js && node book.test.js && node vault.test.js"
+    "test": "node compile.js && node book.test.js && node vault.test.js && node strategy.test.js"
   },
   "dependencies": {
     "ethers": "6.13.4",

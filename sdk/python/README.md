@@ -76,6 +76,26 @@ Limits, plainly:
 - Reads go through whatever RPC endpoint you give `Info(network, rpc_url=...)`. For a tight loop use your own
   endpoint, not the public one.
 
+## Strategies for a vault
+
+The dashboard's strategy builder (Vaults, as the vault's leader) exports rules as JSON. The SDK runs them:
+
+    python3 examples/run_strategy.py strategy.json        # config.json: leader or agent key, vault_address
+
+```python
+from perma.strategy import Runner
+Runner(vault_exchange, json.load(open("strategy.json"))).run()
+```
+
+A rule quotes one side at NAV plus or minus a percentage, for a size in tokens, in % of the vault's cash (buys)
+or in % of its position (sells), always or only while the market is below or above NAV by some percentage.
+Each check reads the vault, keeps the resting orders that still fit, cancels the others and places what is
+missing. `maxInvestedPct` caps the invested part of the vault, `requotePct` is how far NAV may move before an
+order is replaced, `postOnly` holds back a quote that would trade at once. `perma.strategy.plan` is the same
+function as the dashboard's; `test/strategy.test.js` compares the two on 400 random cases.
+
+The rules are a convenience for the leader. They are not on-chain, and depositors cannot rely on them.
+
 ## Running the tests and examples locally
 
     cd ../../test && npm install && node compile.js && node serve.js     # local chain on 127.0.0.1:8545
