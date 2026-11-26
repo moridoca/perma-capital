@@ -1,5 +1,5 @@
 const assert = require('assert')
-const { boot, openMarket, U, E } = require('./chain')
+const { boot, openMarket, mark, U, E } = require('./chain')
 const U6 = 10n ** 6n
 const f6 = (x) => E.formatUnits(x, 6)
 let n = 0
@@ -148,7 +148,7 @@ const fails = async (p, text) => {
   await fails(vault.connect(eve).redeem(U(40001), 0, []), 'Vault: not your shares')
   await fails(vault.connect(dave).redeem(U(6000), 0, []), 'Vault: leader below 5%') // 4,000 of 94,000
   await send(fund.deployCapital(gp.address, U(500000), 'PortCo A'))
-  await send(fund.markInvestments(U(700000), 'revaluation +40%'))
+  await mark(w, U(700000))
   {
     const value = await vault.value(), supply = await vault.totalSupply(), cash = await vault.cashTotal(), tokens = await vault.tokensTotal(0)
     const worth = (value * U(40000)) / supply
@@ -225,7 +225,7 @@ const fails = async (p, text) => {
     assert.strictEqual((await usdc.balanceOf(a2)) - free0, due); assert.strictEqual(await v2.cashTotal(), c0 + due)
 
     await send(v2.connect(dave).limitSell(0, U(1000), 1400000n, []))
-    await send(fund.markInvestments(U(500000), 'write-down'))
+    await mark(w, U(500000))
     assert(await v2.sharePrice() < U6, 'vault at a loss')
     await fails(v2.connect(frank).close(), 'Vault: only the leader')
     await fails(v2.connect(dave).close(), 'Vault: sell all positions first')

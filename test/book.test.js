@@ -1,5 +1,5 @@
 const assert = require('assert'), fs = require('fs'), path = require('path')
-const { boot, openMarket, U, E } = require('./chain')
+const { boot, openMarket, mark, U, E } = require('./chain')
 const U6 = 10n ** 6n
 // The dashboard's own maths, cut out of docs/app.js: what the page previews is checked against the contract.
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'docs', 'app.js'), 'utf8')
@@ -233,7 +233,7 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
     await send(book.connect(bob).limitSell(U(1000), 1050000n, []))
     await send(fund.deployCapital(eve.address, U(500000), 'PortCo A'))
     assert.strictEqual(await fund.navPerToken(), U6)
-    await send(fund.markInvestments(U(700000), 'revaluation +40%'))
+    await mark(w, U(700000))
     const nav = await fund.navPerToken()
     assert.strictEqual(nav, 1200000n)
     const l = await lad()
@@ -424,7 +424,7 @@ const fails = async (p, text) => { try { await (await p).wait() } catch (e) { le
         } else {
           const inv = await fund.investedValue()
           if (inv === 0n) await send(fund.deployCapital(eve.address, U(300000), 'deal'))
-          else await send(fund.markInvestments((inv * BigInt(85 + rnd(35))) / 100n, 'mark'))
+          else await mark(w, (inv * BigInt(85 + rnd(35))) / 100n)
         }
         ops++
       } catch (e) { rev++; if (!/nothing to|slippage/.test(String(e.reason || e.shortMessage || e.message))) throw e }

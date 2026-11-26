@@ -56,7 +56,17 @@
       'function buy(uint256 tokenAmount)',
       'function closeSale()',
       'function deployCapital(address to, uint256 amount, string memo)',
-      'function markInvestments(uint256 newValue, string memo)',
+      'function proposeMark(uint256 value, bytes32 reportHash, string memo)',
+      'function disputeMark()',
+      'function voteMark(bool accept, uint256 tokenAmount)',
+      'function resolveMark()',
+      'function withdrawMarkVotes(uint256 id)',
+      'function markId() view returns (uint256)',
+      'function marks(uint256 id) view returns (uint256 value, bytes32 reportHash, address proposer, uint256 bond, uint256 deadline, address disputer, uint256 accept, uint256 reject, uint8 state)',
+      'function markEscrow(uint256 id, address voter) view returns (uint256)',
+      'function markBond(uint256 value) view returns (uint256)',
+      'function bondsHeld() view returns (uint256)',
+      'function lastReportHash() view returns (bytes32)',
       'function returnProceeds(uint256 amount, uint256 newInvestedValue)',
       'function mintManagementFee()',
       'function topUpReserve() returns (uint256)',
@@ -78,6 +88,10 @@
       'event CapitalDeployed(address indexed to, uint256 amount, string memo)',
       'event ProceedsReturned(address indexed from, uint256 amount, uint256 newInvestedValue)',
       'event InvestmentsMarked(uint256 oldValue, uint256 newValue, string memo)',
+      'event MarkProposed(uint256 indexed id, uint256 value, bytes32 reportHash, uint256 bond, uint256 deadline, string memo)',
+      'event MarkDisputed(uint256 indexed id, address indexed disputer, uint256 voteDeadline)',
+      'event MarkVoted(uint256 indexed id, address indexed voter, bool accept, uint256 tokens)',
+      'event MarkResolved(uint256 indexed id, bool applied, address bondWinner, uint256 bondPaid)',
       'event NAVUpdated(uint256 navPerToken, uint256 marketPrice, uint256 timestamp)',
       'event ManagementFeeMinted(uint256 tranche, uint256 tokens)',
       'event DividendPaid(uint256 usdc, uint256 perTokenE18)',
@@ -296,7 +310,7 @@
   const FUND_KEYS = ['gp', 'saleClosed', 'sold', 'initialSupply', 'investedValue', 'feeTranchesMinted', 'lastFeeMint',
     'surplus', 'buybackApproved', 'dividendApproved', 'dividendsUnclaimed', 'issueKind', 'freeCash', 'issuanceApproved', 'issueProposalId', 'issueProposed', 'issueDeadline', 'issueYes', 'issuanceVoteActive', 'proposalId', 'proposedGP', 'voteDeadline', 'yesVotes', 'vaultCash', 'netAssets',
     'outstandingSupply', 'navPerToken', 'marketPrice', 'premiumBps', 'feePerYear',
-    'eligibleSupply', 'voteActive']
+    'eligibleSupply', 'voteActive', 'markId', 'bondsHeld', 'lastReportHash']
 
   // Contracts deployed before the order book answer none of its calls: say so instead of a bare read error.
   const oldDeployment = (e) => {
@@ -325,6 +339,9 @@
     d.orders = [...o[0]].map((id, k) => ({ id, maker: o[1][k], isBuy: o[2][k], price: o[3][k], tokens: o[4][k] }))
     d.unvested = res[n + 5]; d.claimable = res[n + 6]; d.tranches = res[n + 7]
     BOOK_FEE_BPS = state.fee[f.book] = res[n + 8]
+    const mk = d.markId > 0n ? await fund.marks(d.markId) : null
+    d.mark = mk ? { id: d.markId, value: mk[0], hash: mk[1], proposer: mk[2], bond: mk[3], deadline: Number(mk[4]), disputer: mk[5], accept: mk[6], reject: mk[7], state: Number(mk[8]) } : null
+    d.markOpen = !!d.mark && (d.mark.state === 1 || d.mark.state === 2)
     return d
   }
 
@@ -335,8 +352,9 @@
       ...funds.flatMap((f) => [new E.Contract(f.token, ABI.erc20, p).balanceOf(me), new E.Contract(f.fund, ABI.fund, p).escrowed(f.proposalId, me)])])
     const by = funds.map((f, i) => ({ token: res[1 + i * 2], escrowed: res[2 + i * 2], isGP: f.gp.toLowerCase() === me.toLowerCase() }))
     const fc = new E.Contract(funds[idx].fund, ABI.fund, p)
-    const [issueLocked, dividend] = await Promise.all([d.issueProposalId > 0n ? fc.issueEscrow(d.issueProposalId, me) : 0n, fc.dividendOf(me)])
-    return { dividend, usdc: res[0], token: by[idx].token, escrowed: by[idx].escrowed, issueLocked, isGP: d.gp.toLowerCase() === me.toLowerCase(), by }
+    const [issueLocked, dividend, markLocked] = await Promise.all([d.issueProposalId > 0n ? fc.issueEscrow(d.issueProposalId, me) : 0n, fc.dividendOf(me),
+      d.markId > 0n ? fc.markEscrow(d.markId, me) : 0n])
+    return { dividend, markLocked, usdc: res[0], token: by[idx].token, escrowed: by[idx].escrowed, issueLocked, isGP: d.gp.toLowerCase() === me.toLowerCase(), by }
   }
 
   // Event history of one sub-fund, read in block chunks and kept in memory.
@@ -732,7 +750,7 @@
     } else if (state.ttab === 'treasury') {
       const r = (k, v) => '<tr><td class="l">' + k + '</td><td class="l">' + v + '</td></tr>'
       h = '<table class="tt kv"><tbody>' + r('Vault cash', amt(d.vaultCash) + ' mUSDC') + r('Fund-owned liquidity', amt(d.polTokens) + ' ' + esc(d.symbol) + ' + ' + amt(d.polCash) + ' mUSDC, cannot be withdrawn') +
-        r('Invested value', amt(d.investedValue) + ' mUSDC <span class="pill warn">GP-reported</span>') + r('Surplus pot', amt(d.surplus) + ' mUSDC from fees and ladder profit, inside vault cash; pays for buybacks and dividends only') +
+        r('Invested value', amt(d.investedValue) + ' mUSDC <span class="pill warn">GP-proposed, disputable</span>') + r('Surplus pot', amt(d.surplus) + ' mUSDC from fees and ladder profit, inside vault cash; pays for buybacks and dividends only') +
         r('Approved for buybacks / dividends', amt(d.buybackApproved) + ' / ' + amt(d.dividendApproved) + ' mUSDC') + r('Dividends not collected yet', amt(d.dividendsUnclaimed) + ' mUSDC, no longer part of NAV') + r('Approved issuance', d.issuanceApproved > 0n ? amt(d.issuanceApproved) + ' ' + esc(d.symbol) + ' on offer in the book at ' + usd(d.lad.issue) : d.issuanceVoteActive ? 'vote running on ' + esc(voteWhat(d)) : 'none: holders have approved no new tokens') +
         r('Fee tranches minted', d.feeTranchesMinted + ' of 10') + '</tbody></table><p class="note">The rules and the buttons that anyone can press are under Funds › Rules.</p>'
     } else {
@@ -776,7 +794,7 @@
       cell('Market price', open ? usd(d.marketPrice) : '–', open ? gapText(Number(d.premiumBps)) + ' vs NAV' : 'market opens when the sale closes') +
       cell('Net assets', amt(d.netAssets), 'mUSDC') +
       cell('Vault cash', amt(d.vaultCash), 'mUSDC, read on-chain') +
-      cell('Invested value', amt(d.investedValue), '<span class="pill warn">GP-reported</span> ' + share.toFixed(1) + '% of net assets') +
+      cell('Invested value', amt(d.investedValue), '<span class="pill warn">GP-proposed, disputable</span> ' + share.toFixed(1) + '% of net assets') +
       cell('Outstanding supply', amt(d.outstandingSupply), s + ', excl. the fund\'s tokens on the ladder') +
       cell('Fund liquidity in the book', open ? amt(d.polTokens) + ' / ' + amt(d.polCash) : '–', open ? s + ' / mUSDC on the ladder' : 'placed when the sale closes') +
       cell('Fund-owned liquidity', open ? amt(d.polTokens) + ' / ' + amt(d.polCash) : '–', open ? s + ' / mUSDC, cannot be withdrawn' : 'created when the sale closes')
@@ -784,6 +802,9 @@
   const gapText = (bps) => (bps < 0 ? 'discount ' : 'premium ') + pct(Math.abs(bps))
 
   // One entry per rule: [state of the lamp, status html]. 'off' = needs attention or can be acted on now.
+  const markBond = (v) => { const b = (v * 100n) / 10000n; return b < 10n * U6 ? 10n * U6 : b }
+  const markText = (d) => !d.mark ? '' : 'Proposed ' + amt(d.mark.value) + ' mUSDC (now ' + amt(d.investedValue) + ') · bond ' + amt(d.mark.bond) +
+    (d.mark.state === 2 ? ' · for ' + amt(d.mark.accept) + ' / against ' + amt(d.mark.reject) : '') + ' · ' + (d.mark.deadline > now() ? dur(d.mark.deadline - now()) + ' left' : 'window over')
   const voteWhat = (d) => amt(d.issueProposed) + (Number(d.issueKind) === 1 ? ' mUSDC from the surplus for a buyback' : Number(d.issueKind) === 2 ? ' mUSDC from the surplus as a dividend' : ' new ' + d.symbol)
   const RULES = [
     { k: 'sale', t: 'Primary sale', p: 'Fixed $1.00 per token, hard cap of 9,500,000 tokens.', act: 'close' },
@@ -836,7 +857,7 @@
         '<div class="meter"><i style="width:' + Math.min(100, share) + '%"></i><b style="left:50%"></b></div>']
     }
     const share = d.netAssets > 0n ? Number((d.investedValue * 10000n) / d.netAssets) / 100 : 0
-    return d.investedValue > 0n ? ['off', '<span class="pill warn">GP-reported</span> <span class="num">' + amt(d.investedValue) + '</span> mUSDC = ' + share.toFixed(1) + '% of net assets']
+    return d.investedValue > 0n ? ['off', '<span class="pill warn">GP-proposed, disputable</span> <span class="num">' + amt(d.investedValue) + '</span> mUSDC = ' + share.toFixed(1) + '% of net assets']
       : ['ok', 'Nothing is invested off-chain: every number on this page is read on-chain']
   }
   function renderRules() {
@@ -858,7 +879,10 @@
       case 'SaleClosed': return 'Sale closed with ' + amt(a[0]) + ' sold; ' + amt(a[1]) + ' ' + s + ' + ' + amt(a[2]) + ' mUSDC locked as fund-owned liquidity'
       case 'CapitalDeployed': return 'GP deployed ' + amt(a[1]) + ' mUSDC: “' + a[2] + '”'
       case 'ProceedsReturned': return 'Proceeds of ' + amt(a[1]) + ' mUSDC returned to the vault; remaining portfolio value ' + amt(a[2])
-      case 'InvestmentsMarked': return 'GP revalued the portfolio ' + amt(a[0]) + ' → ' + amt(a[1]) + ': “' + a[2] + '”'
+      case 'InvestmentsMarked': return 'Portfolio value ' + amt(a[0]) + ' → ' + amt(a[1]) + ' applied'
+      case 'MarkProposed': return 'GP proposed a portfolio value of ' + amt(a[1]) + ' mUSDC with a bond of ' + amt(a[3]) + ': “' + a[5] + '”'
+      case 'MarkDisputed': return 'A holder disputed valuation #' + a[0]
+      case 'MarkResolved': return 'Valuation #' + a[0] + (a[1] ? ' applied' : ' rejected') + '; ' + amt(a[3]) + ' mUSDC of bonds paid out'
       case 'ManagementFeeMinted': return 'Management fee tranche ' + a[0] + ': ' + amt(a[1]) + ' ' + s + ' minted into vesting'
       case 'DividendPaid': return 'Dividend paid: ' + amt(a[0]) + ' mUSDC to the tokens in wallets'
       case 'DividendClaimed': return 'Dividend collected by ' + short(a[0]) + ': ' + amt(a[1]) + ' mUSDC'
@@ -902,7 +926,7 @@
       '<div class="rtiles">' +
       tile('Net assets', amt(d.netAssets), 'mUSDC') + tile('NAV per token', usd(d.navPerToken), 'net assets / outstanding supply') +
       tile('Market price', open ? usd(d.marketPrice) : '–', open ? gapText(Number(d.premiumBps)) + ' vs NAV' : 'market not open') +
-      tile('Invested value', amt(d.investedValue), '<span class="pill warn">GP-reported</span>') +
+      tile('Invested value', amt(d.investedValue), '<span class="pill warn">GP-proposed, disputable</span>') +
       tile('Vault cash', amt(d.vaultCash), 'mUSDC, on-chain') + tile('Value created', sg(gain), 'reported value + proceeds − cost') +
       tile('Buybacks', amt(bbSpent), amt(bbBurned) + ' ' + s + ' burned') + tile('Fee tokens minted', amt(feeTok), d.feeTranchesMinted + ' of 10 tranches') + '</div>'
 
@@ -1799,11 +1823,14 @@
       why: (d) => need(d.saleClosed, 'Possible after the sale closes.'),
       pre: (d, m, v) => 'Vault cash after: ' + amt(d.vaultCash > v.a ? d.vaultCash - v.a : 0n) + ' mUSDC',
       steps: async (c, v) => [['Deploying capital', c.fund, 'deployCapital', [v.to, v.a, v.memo]]] },
-    { id: 'mark', tab: 'gp', gp: true, title: 'Revalue the portfolio', lead: 'State what the off-chain investments are worth now. This is the oracle of the model.', btn: 'Report new value',
-      fields: [F.usdc('val'), F.text('memo', 'Memo, e.g. Year-end valuation')],
-      why: () => '',
-      pre: (d, m, v) => d.outstandingSupply === 0n ? '' : 'NAV per token after: about ' + usd(((d.vaultCash + d.polCash + v.val) * U6) / d.outstandingSupply) + ' (now ' + usd(d.navPerToken) + ')',
-      steps: async (c, v) => [['Revaluing the portfolio', c.fund, 'markInvestments', [v.val, v.memo]]] },
+    { id: 'mark', tab: 'gp', gp: true, title: 'Propose a revaluation', lead: 'State what the off-chain investments are worth. The value applies only after the dispute window; you post a bond of 1% (at least 10 mUSDC) that you lose if holders reject it. The report text is stored as its hash.', btn: 'Propose value',
+      fields: [F.usdc('val'), F.text('report', 'Report: link or full text, stored as hash'), F.text('memo', 'Memo, e.g. Q3 2026 valuation')],
+      why: (d) => !d.saleClosed ? 'Possible after the sale closes.' : d.markOpen ? 'A valuation is still pending.' : '',
+      pre: (d, m, v) => d.outstandingSupply === 0n ? '' : 'Bond ' + amt(markBond(v.val)) + ' mUSDC · NAV per token after: about ' + usd(((d.netAssets - d.investedValue + v.val) * U6) / d.outstandingSupply) + ' (now ' + usd(d.navPerToken) + ') · applies after ' + dur(state.voting || 0) + ' unless disputed',
+      steps: async (c, v) => {
+        if (!v.report) throw new Error('Name the report behind the value: a link or its text.')
+        return [await approval(c, c.usdc, c.f.fund, markBond(v.val), 'mUSDC'), ['Proposing a revaluation', c.fund, 'proposeMark', [v.val, E.id(v.report), v.memo]]]
+      } },
     { id: 'followon', tab: 'gp', gp: true, title: 'Propose new tokens', lead: 'Ask holders to approve an amount of new tokens. Approved tokens are offered to everyone in the order book at NAV +0.2%; the GP sets neither price nor buyer.', btn: 'Start the vote', fields: [F.tok('a')],
       why: (d) => !d.saleClosed ? 'Possible after the sale closes.' : d.issuanceVoteActive ? 'A vote on new tokens is already running.' : '',
       pre: (d) => 'Already approved and unsold: ' + amt(d.issuanceApproved) + ' · issue price now ' + usd(d.lad.issue),
@@ -1844,6 +1871,29 @@
       show: (d) => d.voteActive,
       why: (d) => !d.voteActive ? 'No vote is running.' : d.yesVotes * 10000n > d.eligibleSupply * 5000n ? '' : 'Threshold of more than 50% not reached.',
       steps: async (c) => [['Executing the GP removal', c.fund, 'executeRemoveGP', []]] },
+    { id: 'mdispute', tab: 'govern', title: 'Valuation: dispute', lead: 'Disagree with the value the GP proposed. You post the same bond as the GP; holders then vote, and the losing side forfeits its bond to the winner.', btn: 'Dispute the value', fields: [],
+      show: (d) => !!d.mark && d.mark.state === 1,
+      why: (d, m) => !d.mark || d.mark.state !== 1 || d.mark.deadline < now() ? 'Nothing to dispute.' : m && m.isGP ? 'The GP cannot dispute his own value.' : m && m.token === 0n ? 'Token holders only.' : '',
+      pre: (d) => markText(d),
+      steps: async (c) => [await approval(c, c.usdc, c.f.fund, c.d.mark.bond, 'mUSDC'), ['Disputing the valuation', c.fund, 'disputeMark', []]] },
+    { id: 'mvoteyes', tab: 'govern', title: 'Valuation: vote for the GP\u2019s value', btn: 'Lock tokens: accept', fields: [F.tok('a')], chips: [{ l: 'Max', pct: 100, of: 'token' }],
+      show: (d) => !!d.mark && d.mark.state === 2,
+      why: (d, m) => d.mark.deadline < now() ? 'The vote is over.' : m && m.isGP ? 'The GP cannot vote.' : '',
+      pre: (d) => markText(d),
+      steps: async (c, v) => [await approval(c, c.token, c.f.fund, v.a, c.d.symbol), ['Voting for the value', c.fund, 'voteMark', [true, v.a]]] },
+    { id: 'mvoteno', tab: 'govern', title: 'Valuation: vote against', btn: 'Lock tokens: reject', fields: [F.tok('a')], chips: [{ l: 'Max', pct: 100, of: 'token' }],
+      show: (d) => !!d.mark && d.mark.state === 2,
+      why: (d, m) => d.mark.deadline < now() ? 'The vote is over.' : m && m.isGP ? 'The GP cannot vote.' : '',
+      steps: async (c, v) => [await approval(c, c.token, c.f.fund, v.a, c.d.symbol), ['Voting against the value', c.fund, 'voteMark', [false, v.a]]] },
+    { id: 'mresolve', tab: 'govern', title: 'Valuation: settle', lead: 'Anyone can settle once the window is over. Undisputed, the value applies; disputed, more tokens for than against apply it, a tie rejects it.', btn: 'Settle', fields: [],
+      show: (d) => d.markOpen,
+      why: (d) => d.mark.deadline >= now() ? 'Open for another ' + dur(d.mark.deadline - now()) + '.' : '',
+      pre: (d) => markText(d),
+      steps: async (c) => [['Settling the valuation', c.fund, 'resolveMark', []]] },
+    { id: 'mwithdraw', tab: 'govern', title: 'Valuation: withdraw locked votes', btn: 'Withdraw', ghost: true, fields: [],
+      show: (d, m) => !!m && m.markLocked > 0n,
+      why: (d) => d.markOpen ? 'The vote is still running.' : '',
+      steps: async (c) => [['Withdrawing locked votes', c.fund, 'withdrawMarkVotes', [c.d.markId]]] },
     { id: 'claimdiv', tab: 'govern', title: 'Collect your dividend', lead: 'Dividends stay with whoever held the tokens when they were paid.', btn: 'Collect', fields: [],
       show: (d, m) => !!m && m.dividend > 0n,
       why: (d, m) => (m && m.dividend > 0n ? '' : 'Nothing to collect.'),
