@@ -41,6 +41,8 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
 | Surplus pot | the 0.07% taker fees, and what the ladder's rungs hold above their share of 5% of net assets once anyone calls sweepLadder(); part of vault cash and of NAV, but the GP cannot invest it | surplus, fee, sweepLadder, freeCash |
 | Buyback | only from the surplus pot, only the amount holders approved (GP proposes, more than 50% of eligible supply says yes), carried out by the GP, only while the market is below NAV; tokens are burned | proposeSurplusUse, buyback |
 | Dividend | only from the surplus pot, same vote; the GP pays it as mUSDC per token to every token in a wallet at that moment; holders collect it; a declared dividend leaves NAV | proposeSurplusUse, payDividend, claimDividend |
+| Valuation | the GP proposes a portfolio value with the hash of the report behind it and a bond of 1% of the value (at least 10 mUSDC); it applies after one voting period unless a holder disputes it with the same bond; then holders vote by locking tokens, more for than against applies it (a tie rejects), and the winner receives both bonds. Bonds are not fund money: they count neither in net assets nor in free cash. While a valuation is pending, no capital is deployed or returned | proposeMark, disputeMark, voteMark, resolveMark, MARK_BOND_BPS |
+| Proceeds | returnProceeds can only lower the portfolio value, and by no more than the cash that came back; any other change is a revaluation | returnProceeds |
 | GP removal | more than 50% of eligible supply votes yes; unvested fee tokens are burned | executeRemoveGP |
 | Eligible supply | total supply minus unvested fee tokens, the fund's own tokens on the ladder and the GP's wallet | eligibleSupply |
 
@@ -49,8 +51,11 @@ All amounts use 6 decimals, like USDC: 1 token = 1000000, $1.00 = 1000000.
     NAV per token = (vault cash + the fund's cash on the ladder + investedValue) / outstanding supply
 
 - Vault cash and the ladder's cash are read on-chain.
-- investedValue is reported by the GP (deployCapital books at cost,
-  markInvestments revalues). This is the one trust assumption of the model.
+- investedValue is booked at cost by deployCapital and changed afterwards only
+  by a valuation that has passed its dispute window (proposeMark ... resolveMark),
+  or lowered by returnProceeds. The number still comes from outside the chain:
+  the contract does not make it true, it makes a wrong one cost the GP his bond
+  and gives holders a week to object and an exit through the ladder meanwhile.
 - Outstanding supply excludes the fund's own tokens on the ladder (treasury stock).
 
 Market price and NAV are two separate numbers, but the fund keeps them close:
@@ -197,7 +202,10 @@ the order book before trading.
 
 ## Known limits
 
-- GP-reported investment value is not verified on-chain.
+- The investment value is proposed by the GP and can be disputed, but not verified
+  on-chain. Holders who do not look will not dispute; the bond only bites if someone does.
+- A dispute vote counts the tokens cast, not eligible supply: a small turnout decides.
+  The GP cannot vote from his own wallet, but can from others.
 - The ladder and the issue price follow the GP-reported NAV. A valuation that
   is too high lets holders sell to the fund's bids at too high a price; what is
   exposed there is the cash in the book. A valuation that is too low lets

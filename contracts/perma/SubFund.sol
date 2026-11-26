@@ -32,8 +32,13 @@ interface IComponentDeployer {
 ///             them and holders approve
 ///           - token holders can replace the GP; unvested fee tokens are burned
 ///
+///           - a revaluation of the off-chain portfolio is a proposal with a
+///             bond and a report hash; holders can dispute it, and the side
+///             that loses a dispute vote forfeits its bond to the other
+///
 ///         What stays a trust assumption: the value of off-chain
-///         investments is reported by the GP (investedValue).
+///         investments comes from the GP (investedValue). It is disputable,
+///         not verifiable.
 ///         Cash and the fund's liquidity in the book are read on-chain and
 ///         cannot be misstated. Because the ladder is quoted around NAV, a
 ///         wrong valuation moves the fund's own bids and asks: the most it
@@ -58,6 +63,23 @@ contract SubFund {
     // --- governance ---
     uint256 public constant REMOVAL_THRESHOLD_BPS = 5000; // more than 50% of eligible supply
 
+    // --- valuation: proposal, bond, dispute ---
+    uint256 public constant MARK_BOND_BPS = 100;      // bond = 1% of the proposed portfolio value
+    uint256 public constant MIN_MARK_BOND = 10e6;     // at least 10 mUSDC
+
+    // a revaluation of the off-chain portfolio waiting to take effect
+    struct Mark {
+        uint256 value;        // proposed investedValue
+        bytes32 reportHash;   // fingerprint of the report behind it (e.g. keccak256 of the PDF)
+        address proposer;     // the GP who posted the bond
+        uint256 bond;         // posted by the proposer, and again by a disputer
+        uint256 deadline;     // end of the dispute window, then end of the holder vote
+        address disputer;     // zero while undisputed
+        uint256 accept;       // tokens locked for the GP's value
+        uint256 reject;       // tokens locked against it
+        uint8 state;          // 1 open, 2 disputed, 3 applied, 4 rejected
+    }
+
     string public name;
     IERC20Like public immutable usdc;
     FundToken public immutable token;
@@ -80,7 +102,14 @@ contract SubFund {
     uint256 public initialSupply;
 
     // portfolio state
-    uint256 public investedValue; // GP-reported value of off-chain investments (mUSDC, 6 decimals)
+    uint256 public investedValue; // value of off-chain investments (mUSDC, 6 decimals): at cost, then as marked
+
+    // valuation state
+    uint256 public markId;                   // id of the latest proposal
+    mapping(uint256 => Mark) public marks;
+    mapping(uint256 => mapping(address => uint256)) public markEscrow; // tokens locked in a dispute vote
+    uint256 public bondsHeld;                // mUSDC bonds in the vault; not fund money
+    bytes32 public lastReportHash;           // report behind the value in force
 
     // fee state
     uint256 public feeTranchesMinted;
@@ -121,6 +150,10 @@ contract SubFund {
     event CapitalDeployed(address indexed to, uint256 amount, string memo);
     event ProceedsReturned(address indexed from, uint256 amount, uint256 newInvestedValue);
     event InvestmentsMarked(uint256 oldValue, uint256 newValue, string memo);
+    event MarkProposed(uint256 indexed id, uint256 value, bytes32 reportHash, uint256 bond, uint256 deadline, string memo);
+    event MarkDisputed(uint256 indexed id, address indexed disputer, uint256 voteDeadline);
+    event MarkVoted(uint256 indexed id, address indexed voter, bool accept, uint256 tokens);
+    event MarkResolved(uint256 indexed id, bool applied, address bondWinner, uint256 bondPaid);
     event NAVUpdated(uint256 navPerToken, uint256 marketPrice, uint256 timestamp);
     event ManagementFeeMinted(uint256 tranche, uint256 tokens);
     event BuybackExecuted(address indexed caller, uint256 usdcSpent, uint256 tokensBurned, uint256 priceAfter);
@@ -209,6 +242,7 @@ contract SubFund {
     /// @notice GP sends vault cash to an investment (off-chain asset). Booked at cost.
     function deployCapital(address to, uint256 amount, string calldata memo) external onlyGP {
         require(saleClosed, "Fund: sale open");
+        require(!markOpen(), "Fund: valuation pending");
         require(amount <= freeCash(), "Fund: above free vault cash");
         investedValue += amount;
         require(usdc.transfer(to, amount), "Fund: transfer failed");
@@ -216,21 +250,117 @@ contract SubFund {
         _emitNAV();
     }
 
-    /// @notice GP revalues the off-chain portfolio. This is the oracle of the model.
-    function markInvestments(uint256 newValue, string calldata memo) external onlyGP {
-        emit InvestmentsMarked(investedValue, newValue, memo);
-        investedValue = newValue;
-        _emitNAV();
-    }
-
     /// @notice Exit or income comes back into the vault. The GP states the
     ///         remaining portfolio value in the same transaction, so cash is
     ///         never counted twice. Nothing is paid out: it compounds.
+    ///         The remaining value can only stay or fall, and by no more than
+    ///         the cash that came back: any other change is a revaluation and
+    ///         has to go through proposeMark.
     function returnProceeds(uint256 amount, uint256 newInvestedValue) external onlyGP {
+        require(!markOpen(), "Fund: valuation pending");
+        require(newInvestedValue <= investedValue && newInvestedValue + amount >= investedValue,
+            "Fund: revalue via proposeMark");
         require(usdc.transferFrom(msg.sender, address(this), amount), "Fund: payment failed");
         investedValue = newInvestedValue;
         emit ProceedsReturned(msg.sender, amount, newInvestedValue);
         _emitNAV();
+    }
+
+    // ------------------------------------------------------------------
+    // Valuation: the GP's revaluation is a proposal with a bond. Holders
+    // can dispute it with the same bond; then holders decide by locking
+    // tokens, and the side that loses forfeits its bond to the other.
+    //   state 1 = open, 2 = disputed, 3 = applied, 4 = rejected
+    // ------------------------------------------------------------------
+
+    function markOpen() public view returns (bool) {
+        uint8 s = marks[markId].state;
+        return s == 1 || s == 2;
+    }
+
+    /// @notice Bond for a proposed portfolio value: 1%, at least 10 mUSDC.
+    function markBond(uint256 value) public pure returns (uint256 b) {
+        b = (value * MARK_BOND_BPS) / 10_000;
+        if (b < MIN_MARK_BOND) b = MIN_MARK_BOND;
+    }
+
+    /// @notice GP proposes a new value for the off-chain portfolio, names the
+    ///         report behind it by its hash and posts the bond (approve mUSDC
+    ///         first). Takes effect after the dispute window unless disputed.
+    function proposeMark(uint256 value, bytes32 reportHash, string calldata memo) external onlyGP {
+        require(saleClosed, "Fund: sale open");
+        require(!markOpen(), "Fund: valuation pending");
+        require(reportHash != bytes32(0), "Fund: report hash missing");
+        uint256 bond = markBond(value);
+        require(usdc.transferFrom(msg.sender, address(this), bond), "Fund: bond failed");
+        bondsHeld += bond;
+        markId += 1;
+        Mark storage m = marks[markId];
+        m.value = value;
+        m.reportHash = reportHash;
+        m.proposer = msg.sender;
+        m.bond = bond;
+        m.deadline = block.timestamp + VOTING_PERIOD;
+        m.state = 1;
+        emit MarkProposed(markId, value, reportHash, bond, m.deadline, memo);
+    }
+
+    /// @notice A holder disputes the pending value by posting the same bond.
+    ///         A holder vote of VOTING_PERIOD follows.
+    function disputeMark() external {
+        Mark storage m = marks[markId];
+        require(m.state == 1 && block.timestamp <= m.deadline, "Fund: nothing to dispute");
+        require(msg.sender != gp && token.balanceOf(msg.sender) > 0, "Fund: holders only");
+        require(usdc.transferFrom(msg.sender, address(this), m.bond), "Fund: bond failed");
+        bondsHeld += m.bond;
+        m.disputer = msg.sender;
+        m.state = 2;
+        m.deadline = block.timestamp + VOTING_PERIOD;
+        emit MarkDisputed(markId, msg.sender, m.deadline);
+    }
+
+    /// @notice Vote on a disputed value by locking tokens until it is resolved.
+    function voteMark(bool accept, uint256 tokenAmount) external {
+        Mark storage m = marks[markId];
+        require(m.state == 2 && block.timestamp <= m.deadline, "Fund: no dispute vote");
+        require(msg.sender != gp, "Fund: GP cannot vote");
+        require(tokenAmount > 0, "Fund: zero amount");
+        markEscrow[markId][msg.sender] += tokenAmount;
+        if (accept) m.accept += tokenAmount;
+        else m.reject += tokenAmount;
+        require(token.transferFrom(msg.sender, address(this), tokenAmount), "Fund: lock failed");
+        emit MarkVoted(markId, msg.sender, accept, tokenAmount);
+    }
+
+    /// @notice Anyone can settle a valuation once its window is over.
+    ///         Undisputed: the value applies and the GP gets the bond back.
+    ///         Disputed: more tokens for than against applies it (a tie rejects);
+    ///         the winning side receives both bonds.
+    function resolveMark() external {
+        Mark storage m = marks[markId];
+        require((m.state == 1 || m.state == 2) && block.timestamp > m.deadline, "Fund: nothing to resolve");
+        bool applied = m.state == 1 || m.accept > m.reject;
+        uint256 pot = m.state == 1 ? m.bond : 2 * m.bond;
+        address winner = applied ? m.proposer : m.disputer;
+        m.state = applied ? 3 : 4;
+        bondsHeld -= pot;
+        if (applied) {
+            emit InvestmentsMarked(investedValue, m.value, "mark");
+            investedValue = m.value;
+            lastReportHash = m.reportHash;
+        }
+        require(usdc.transfer(winner, pot), "Fund: payout failed");
+        emit MarkResolved(markId, applied, winner, pot);
+        _emitNAV();
+    }
+
+    /// @notice Get tokens locked in a dispute vote back once it is resolved.
+    function withdrawMarkVotes(uint256 id) external {
+        require(marks[id].state > 2, "Fund: not resolved");
+        uint256 amount = markEscrow[id][msg.sender];
+        require(amount > 0, "Fund: nothing locked");
+        markEscrow[id][msg.sender] = 0;
+        require(token.transfer(msg.sender, amount), "Fund: unlock failed");
     }
 
     /// @notice Cash held directly by the fund.
@@ -246,14 +376,14 @@ contract SubFund {
     /// @notice Vault cash the GP can invest: without the surplus pot and without
     ///         dividends that are declared and not collected yet.
     function freeCash() public view returns (uint256) {
-        return vaultCash() - surplus - dividendsUnclaimed;
+        return vaultCash() - surplus - dividendsUnclaimed - bondsHeld;
     }
 
-    /// @notice Net assets = vault cash (surplus included, declared dividends not)
-    ///         + the fund's cash in the book + reported investments.
+    /// @notice Net assets = vault cash (surplus included; declared dividends and
+    ///         valuation bonds not) + the fund's cash in the book + investments.
     function netAssets() public view returns (uint256) {
         (, uint256 bookCash) = ownedLiquidity();
-        return vaultCash() - dividendsUnclaimed + bookCash + investedValue;
+        return vaultCash() - dividendsUnclaimed - bondsHeld + bookCash + investedValue;
     }
 
     /// @notice Tokens held by investors and the GP. The fund's own tokens on
